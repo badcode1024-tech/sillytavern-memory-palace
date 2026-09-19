@@ -1,0 +1,13 @@
+{
+    "display_name": "记忆宫殿 (Memory Palace)",
+    "loading_order": 10,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "badcode1024-tech",
+    "version": "0.6.0",
+    "homePage": "https://github.com/badcode1024-tech/sillytavern-long-term-memory",
+    "auto_update": true,
+    "license": "MIT"
+}
