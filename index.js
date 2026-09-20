@@ -1610,17 +1610,18 @@
 --ltm-aux:${theme.aux};
 --ltm-text:${theme.text};
 }
-#ltm-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:30000;width:52px;height:52px;cursor:grab;user-select:none;-webkit-user-select:none;transition:transform .2s ease,right .3s ease,left .3s ease,opacity .2s ease;touch-action:none;}
+/* 悬浮球：位置完全由 JS 以内联 left/top 控制，CSS 仅负责外观与过渡 */
+#ltm-fab{position:fixed;left:0;top:0;z-index:30000;width:52px;height:52px;cursor:grab;user-select:none;-webkit-user-select:none;transition:left .28s cubic-bezier(.22,1,.36,1),top .28s cubic-bezier(.22,1,.36,1),opacity .22s ease;touch-action:none;}
 #ltm-fab.ltm-fab-hidden{opacity:0;pointer-events:none;}
+#ltm-fab.ltm-fab-dragging{transition:none;cursor:grabbing;}
 #ltm-fab .ltm-fab-ball{width:100%;height:100%;border-radius:14px;background:linear-gradient(135deg,var(--ltm-accent),var(--ltm-accent-dark));border:1px solid rgba(201,168,106,.6);box-shadow:0 2px 12px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:var(--ltm-bg);font-size:22px;transition:all .25s ease;position:relative;}
 #ltm-fab .ltm-fab-label{position:absolute;right:56px;top:50%;transform:translateY(-50%);white-space:nowrap;background:var(--ltm-accent-dark);color:var(--ltm-bg);font-size:12px;padding:4px 10px;border-radius:8px;opacity:0;pointer-events:none;transition:opacity .2s ease;}
 #ltm-fab:hover .ltm-fab-label{opacity:1;}
-/* 缩进态：吸附到右侧，只露出左侧一小条半透明边边 */
-#ltm-fab.ltm-fab-collapsed[data-side="right"]{right:-44px;opacity:.55;}
-#ltm-fab.ltm-fab-collapsed[data-side="left"]{left:-44px;right:auto;opacity:.55;}
+/* 左侧吸附时，标签改到球体右侧显示，避免超出屏幕 */
+#ltm-fab[data-side="left"] .ltm-fab-label{right:auto;left:56px;}
+/* 缩进态：透明度降到 30%（即 70% 透明），仅露出 1/3 身位，位置由 JS 内联 left 控制 */
+#ltm-fab.ltm-fab-collapsed{opacity:.3;}
 #ltm-fab.ltm-fab-collapsed:hover,#ltm-fab.ltm-fab-collapsed.ltm-fab-dragging{opacity:1;}
-#ltm-fab.ltm-fab-collapsed[data-side="right"]:hover,#ltm-fab.ltm-fab-collapsed[data-side="right"].ltm-fab-dragging{right:0;}
-#ltm-fab.ltm-fab-collapsed[data-side="left"]:hover,#ltm-fab.ltm-fab-collapsed[data-side="left"].ltm-fab-dragging{left:0;}
 #ltm-panel-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.35);z-index:29999;opacity:0;pointer-events:none;transition:opacity .25s ease;}
 #ltm-panel-overlay.ltm-open{opacity:1;pointer-events:auto;}
 #ltm-panel-drawer{position:fixed;top:0;right:0;bottom:0;width:460px;max-width:92vw;height:100vh;height:100dvh;z-index:30002;background-color:var(--ltm-bg);background-image:linear-gradient(160deg,var(--ltm-bg),var(--ltm-bg2));border-left:1px solid rgba(140,28,28,.25);box-shadow:-6px 0 24px rgba(0,0,0,.25);transform:translateX(105%);transition:transform .3s cubic-bezier(.22,1,.36,1);display:flex;flex-direction:column;color:var(--ltm-text);box-sizing:border-box;overflow:hidden;font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;max-height:100vh;max-height:100dvh;}
@@ -1752,45 +1753,76 @@
     function closePanel() {
         document.getElementById('ltm-panel-drawer').classList.remove('ltm-open');
         document.getElementById('ltm-panel-overlay').classList.remove('ltm-open');
-        document.getElementById('ltm-fab').classList.remove('ltm-fab-hidden');
+        const fab = document.getElementById('ltm-fab');
+        fab.classList.remove('ltm-fab-hidden');
+        // 面板关闭后，悬浮球回到缩进贴边态（与 AssistiveTouch 一致）
+        if (fab._ltmSnapCollapsed) fab._ltmSnapCollapsed();
     }
 
     function bindFabDrag() {
         const fab = document.getElementById('ltm-fab');
-        let dragging = false;
-        let moved = false;
-        let startX = 0, startY = 0, origX = 0, origY = 0;
+        const FAB_SIZE = 52;                 // 悬浮球尺寸（与 CSS width/height 一致）
+        const HOLD_MS = 220;                 // 按住此毫秒数以内松手视为「点击」，超过则视为「拖拽」
+        const MOVE_THRESHOLD = 3;            // 移动超过该像素才判定为拖拽
+        const EDGE_GAP = 0;                  // 展开态贴边时与屏幕边缘的间距
+        let dragging = false;                // 是否正在拖拽
+        let moved = false;                   // 是否产生过位移
+        let startX = 0, startY = 0;          // 按下时的指针坐标
+        let origLeft = 0, origTop = 0;       // 按下时球的左上角坐标
+        let startTime = 0;                   // 按下时间戳（用于区分点击/拖拽）
 
+        // 将球平滑吸附到最近边缘，可指定是否缩进
         const snapToEdge = (shouldCollapse) => {
+            const side = fab.dataset.side || 'right';
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            // 读取当前（拖拽结束那一刻）球的实际位置作为「高度」锚点
             const rect = fab.getBoundingClientRect();
-            const centerX = rect.left + rect.width / 2;
-            const side = centerX < window.innerWidth / 2 ? 'left' : 'right';
-            fab.dataset.side = side;
-            // 先清除内联 left/right/top，让 CSS 接管吸附位置
-            fab.style.left = '';
-            fab.style.right = '';
-            fab.style.top = '';
-            fab.style.transform = '';
+            let top = rect.top;
+            // 上下边界夹取，保证球体始终完整可见
+            top = Math.max(0, Math.min(vh - FAB_SIZE, top));
+            let left;
+            if (side === 'left') {
+                left = shouldCollapse ? -(FAB_SIZE * 2 / 3) : EDGE_GAP;
+            } else {
+                left = shouldCollapse ? (vw - FAB_SIZE / 3) : (vw - FAB_SIZE - EDGE_GAP);
+            }
+            fab.style.left = left + 'px';
+            fab.style.top = top + 'px';
+            fab.style.transform = 'none';
+            fab.style.right = 'auto';
             if (shouldCollapse) {
                 fab.classList.add('ltm-fab-collapsed');
             } else {
                 fab.classList.remove('ltm-fab-collapsed');
             }
-            // 保存吸附位置到内存（供后续恢复）
-            fab._ltmSide = side;
         };
+
+        // 让球贴到指定边缘并「完全展开」（不缩进），返回该侧边
+        const expandToSide = (side) => {
+            fab.dataset.side = side;
+            snapToEdge(false);
+        };
+
+        // 监听窗口尺寸变化，避免缩放/旋转后球跑出屏幕
+        const reflow = () => {
+            if (!fab.classList.contains('ltm-fab-dragging')) {
+                snapToEdge(fab.classList.contains('ltm-fab-collapsed'));
+            }
+        };
+        window.addEventListener('resize', reflow);
 
         const onStart = (clientX, clientY) => {
             dragging = true;
             moved = false;
             startX = clientX;
             startY = clientY;
+            startTime = Date.now();
             const rect = fab.getBoundingClientRect();
-            origX = rect.left;
-            origY = rect.top;
+            origLeft = rect.left;
+            origTop = rect.top;
             fab.classList.add('ltm-fab-dragging');
             fab.classList.remove('ltm-fab-collapsed');
-            fab.style.transition = 'none';
             fab.style.opacity = '1';
         };
 
@@ -1798,12 +1830,14 @@
             if (!dragging) return;
             const dx = clientX - startX;
             const dy = clientY - startY;
-            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+            if (Math.abs(dx) > MOVE_THRESHOLD || Math.abs(dy) > MOVE_THRESHOLD) moved = true;
 
-            let left = origX + dx;
-            let top = origY + dy;
-            left = Math.max(0, Math.min(window.innerWidth - 52, left));
-            top = Math.max(0, Math.min(window.innerHeight - 52, top));
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            let left = origLeft + dx;
+            let top = origTop + dy;
+            left = Math.max(0, Math.min(vw - FAB_SIZE, left));
+            top = Math.max(0, Math.min(vh - FAB_SIZE, top));
 
             fab.style.left = left + 'px';
             fab.style.top = top + 'px';
@@ -1815,12 +1849,11 @@
             if (!dragging) return;
             dragging = false;
             fab.classList.remove('ltm-fab-dragging');
-            fab.style.transition = '';
             if (!moved) {
-                // 没拖拽（纯点击）：如果当前是缩进态，点击后展开但不缩进（交给 click 处理打开面板）
+                // 无位移：视为点击，交由 click 事件处理展开/呼出，这里不改变位置
                 return;
             }
-            // 拖拽过：松手后吸附到最近边缘并缩进，只露半透明小边边
+            // 拖拽过：松手后贴边吸附并缩进（露出 1/3 半透明边边）
             snapToEdge(true);
         };
 
@@ -1843,19 +1876,33 @@
         }, { passive: true });
         document.addEventListener('touchend', onEnd);
 
-        // 点击（非拖拽）时的行为：
-        // - 缩进态：点击小边边 → 先展开（去缩进），打开面板
+        // 点击（非拖拽）行为：
+        // - 缩进态：点击露出的边边 → 展开到当前所在侧边
         // - 展开态：点击 → 打开面板
         fab.addEventListener('click', (e) => {
             if (moved) {
+                // 拖拽后的残留 click，屏蔽
                 e.stopPropagation();
                 e.preventDefault();
                 moved = false;
                 return;
             }
-            // 点击时展开悬浮球（去掉缩进，避免被半透明边边挡住）
-            fab.classList.remove('ltm-fab-collapsed');
+            if (fab.classList.contains('ltm-fab-collapsed')) {
+                // 缩进态点击：仅展开，不打开面板（与 iPhone AssistiveTouch 一致）
+                e.stopPropagation();
+                e.preventDefault();
+                expandToSide(fab.dataset.side || 'right');
+            }
+            // 展开态点击：不拦截，冒泡到 bindShellEvents 的 click → openPanel
         }, true);
+
+        // 初始化：默认吸附在右侧中部，缩进态
+        fab.dataset.side = 'right';
+        fab.style.top = Math.max(0, Math.min(window.innerHeight - FAB_SIZE, (window.innerHeight - FAB_SIZE) / 2)) + 'px';
+        snapToEdge(true);
+
+        // 暴露给外部（closePanel 用）：面板关闭后让球回到缩进贴边态
+        fab._ltmSnapCollapsed = () => snapToEdge(true);
     }
 
     function switchView(view) {
