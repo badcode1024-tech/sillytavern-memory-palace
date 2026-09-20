@@ -1,5 +1,5 @@
 // =============================================================
-// index.js — 记忆宫殿 Memory Palace 插件（纯前端 SillyTavern 插件，单文件版）
+// index.js — 记忆宫殿插件（纯前端 SillyTavern 插件，单文件版）
 //
 // 架构：纯前端方案，无外部后端、无 mem0ai 依赖。
 // 数据通过 getContext().extensionSettings 持久化到服务端 data/ 目录，
@@ -54,7 +54,7 @@
     const DEFAULT_SETTINGS = {
         enabled: true,
         injectPrompt: true,
-        summaryThreshold: 20,
+        summaryThreshold: 25,
         keepActiveFloors: 5,
         todoCheckInterval: 10,
         npcMinMentions: 3,
@@ -66,6 +66,45 @@
         externalApiModel: '',
         // 分批次总结：每批最大楼层数
         batchSize: 25,
+        // 主题配色 key：'default' | 'theme2' | 'theme3'
+        theme: 'default',
+    };
+
+    // 三组主题配色（重点色 / 底色 / 辅助色）
+    const THEMES = {
+        default: {
+            name: '默认（暗红·米白）',
+            accent: '#8c1c1c',   // 重点色
+            accentDark: '#5e1010',
+            accentDeep: '#b23a2a',
+            gold: '#c9a86a',
+            bg: '#f6f1e6',       // 底色
+            bg2: '#efe6d3',
+            aux: '#8795a5',      // 辅助色（用于文字次要色）
+            text: '#3a2f2a',
+        },
+        theme2: {
+            name: '配色二（蓝灰·米白）',
+            accent: '#70b0cc',
+            accentDark: '#4d8aac',
+            accentDeep: '#c96a4a',
+            gold: '#70b0cc',
+            bg: '#e9e3ce',
+            bg2: '#ddd5bf',
+            aux: '#8795a5',
+            text: '#3a2f2a',
+        },
+        theme3: {
+            name: '配色三（暖黄·奶白）',
+            accent: '#f7df7b',
+            accentDark: '#d9b94c',
+            accentDeep: '#c98a4a',
+            gold: '#f7df7b',
+            bg: '#fefce5',
+            bg2: '#f7f2d0',
+            aux: '#6d9dce',
+            text: '#3a2f2a',
+        },
     };
 
     // ---------------------------------------------------------------------
@@ -83,6 +122,7 @@
 {
   "key_events": [
     {
+      "date": "这条事件发生的具体年月日（格式 YYYY.M.D，如 2036.4.19；若对话中无明确年月日，则根据上下文推断最近的日期）",
       "content": "发生的关键事件描述（一句话，具体、完整）",
       "keywords": ["事件锚点关键词1", "关键词2", "关键词3"],
       "emotions": ["情绪分类1", "情绪分类2"]
@@ -96,6 +136,7 @@
   ],
   "emotion_flow": [
     {
+      "date": "这一阶段覆盖的具体日期区间，格式为「YYYY.M.D-YYYY.M.D」（如 2036.4.1-2036.4.19；若对话中无明确年月日，则用相对时间区间如「第一天-第三天」）",
       "content": "这一阶段「{{char}}」对 user 的情感变化总结（因为哪些事、态度有了什么变化、现在对 user 的看法）",
       "affection": "当前好感度估值（如 10%-20%，或从 25% 降至 18% 之类的变化描述）",
       "relationship": "「{{char}}」认为自己现在和 user 是什么关系（如：恋人、挚友、师徒、宿敌、陌生人等，一句话概括）"
@@ -111,12 +152,14 @@
 
 【严格规则】
 1. 只输出一个合法 JSON 对象，不要输出解释、代码块标记或注释。
-2. key_events 是记忆的核心：每条事件必须独立、完整、可单独理解；keywords 是 1-3 个能触发回忆的锚点词（人名/地名/物品/关键动作等），emotions 是这条事件对应的情绪分类词。
-3. diary 是带日期的流水账，客观记录事实，不抒发个人情绪。date 用「几月几日」格式（如 4.19、4月19日），方便作为纪念日关键词触发。
-4. emotion_flow 是这一阶段的情感变化总结，必须包含好感度百分比 affection，以及 relationship（char 认为自己现在和 user 的关系）。
-5. npc 是对话中出现的其他角色：name 是名字，identity 是身份（如「掌柜」「师姐」「仇人」），brief 是极简略的一句话记忆。NPC 记忆务必简略，不需要像主要角色那么细致。
-6. 没有内容的分区输出空数组 []，important_items 只有在出现真正重要的物品时才填写，没有就输出空数组。
-7. 严禁虚构、推测、补充不存在的信息。
+2. key_events 是记忆的核心：每条事件必须独立、完整、可单独理解；每条事件都必须带 date（年月日时间锚点）；keywords 是 1-3 个能触发回忆的锚点词（人名/地名/物品/关键动作等），emotions 是这条事件对应的情绪分类词。
+3. 【关键词格式铁律】keywords 里的每一个词必须「极简」：英文只能是一个单词，中文只能是一个 2 字或 3 字的词语。严禁输出长短语、整句话、或 4 字以上的词组。例如：正确「戒指」「告白」「生日」「猫」；错误「一起去海边看日出」「她喜欢的那家咖啡店」。
+4. diary 是带日期的流水账，客观记录事实，不抒发个人情绪。date 用「几月几日」格式（如 4.19、4月19日），方便作为纪念日关键词触发。
+5. emotion_flow 是这一阶段的情感变化总结，必须包含具体日期区间 date、好感度百分比 affection，以及 relationship（char 认为自己现在和 user 的关系）。
+6. npc 是对话中出现的其他角色：name 是名字，identity 是身份（如「掌柜」「师姐」「仇人」），brief 是极简略的一句话记忆。NPC 记忆务必简略，不需要像主要角色那么细致。
+7. todos 里，对话中已经明确「做完、完成、兑现、取消」的约定/承诺，done 必须填 true；只有仍未完成的才填 false。同一个约定若在多段对话里反复出现，只输出一次，且按最新状态判断 done。
+8. important_items 中，同一个物品（名称一致）只能出现一次，不要因为多次提及就重复输出；只有在出现真正重要的物品时才填写，没有就输出空数组。
+9. 没有内容的分区输出空数组 []，严禁虚构、推测、补充不存在的信息。
 
 【待总结对话】
 {{chunk}}`,
@@ -172,6 +215,8 @@
 1. 只输出 JSON 数组，不要输出任何 JSON 以外的文字或解释。
 2. 只提取明确说出口的约定/承诺/待办，不要凭空猜测。
 3. content 要完整、具体。
+4. 已经明确「做完、完成、兑现、取消」的约定，done 填 true；只有仍未完成的才填 false。
+5. 同一个约定不要重复输出多次，只输出一次，并按最新状态判断 done。
 
 【对话内容】
 {{chunk}}`,
@@ -298,6 +343,81 @@
         saveSettings();
     }
 
+    // 归一化字符串用于去重比较（去空白、小写）
+    function normalizeStr(s) {
+        return String(s ?? '').replace(/\s+/g, '').toLowerCase();
+    }
+
+    // 重要物品去重：按 name 归一化后比较，已存在则合并/跳过
+    function mergeImportantItems(agentId, items, npcName = null) {
+        const mem = npcName
+            ? getCharacterMemory(agentId).npcs[npcName]
+            : getCharacterMemory(agentId);
+        if (!mem) return;
+        if (!Array.isArray(mem.important_items)) mem.important_items = [];
+
+        for (const raw of items) {
+            const name = typeof raw === 'string' ? raw : (raw?.name || '');
+            const significance = typeof raw === 'object' ? (raw.significance || '') : '';
+            if (!name || !String(name).trim()) continue;
+
+            const key = normalizeStr(name);
+            const existing = mem.important_items.find((it) => {
+                const n = typeof it === 'string' ? it : it?.name;
+                return normalizeStr(n) === key;
+            });
+            if (existing) {
+                // 已存在：若旧条目缺 significance，则补上
+                if (typeof existing === 'object' && !existing.significance && significance) {
+                    existing.significance = significance;
+                }
+                continue;
+            }
+            mem.important_items.push(
+                typeof raw === 'string'
+                    ? raw
+                    : { name: String(name).trim(), significance: significance || '' }
+            );
+        }
+        getCharacterMemory(agentId).meta.updated_at = Date.now();
+        saveSettings();
+    }
+
+    // 待办去重 + 完成态合并：按 content 归一化去重；已存在的待办若新结果标记 done，则更新为完成
+    function mergeTodos(agentId, items, npcName = null) {
+        const mem = npcName
+            ? getCharacterMemory(agentId).npcs[npcName]
+            : getCharacterMemory(agentId);
+        if (!mem) return;
+        if (!Array.isArray(mem.todos)) mem.todos = [];
+
+        for (const raw of items) {
+            const content = typeof raw === 'string' ? raw : (raw?.content || '');
+            const done = typeof raw === 'object' ? !!raw.done : false;
+            if (!content || !String(content).trim()) continue;
+
+            const key = normalizeStr(content);
+            const existing = mem.todos.find((t) => {
+                const c = typeof t === 'string' ? t : t?.content;
+                return normalizeStr(c) === key;
+            });
+            if (existing) {
+                // 已存在：若新结果标记为已完成，则更新为完成（完成态只进不退）
+                if (done && typeof existing === 'object') {
+                    existing.done = true;
+                }
+                continue;
+            }
+            mem.todos.push(
+                typeof raw === 'string'
+                    ? raw
+                    : { content: String(content).trim(), done: done }
+            );
+        }
+        getCharacterMemory(agentId).meta.updated_at = Date.now();
+        saveSettings();
+    }
+
     function updatePartitionItem(agentId, partition, index, newItem, npcName = null) {
         const mem = npcName
             ? getCharacterMemory(agentId).npcs[npcName]
@@ -375,6 +495,81 @@
         return Object.keys(mem.npcs || {});
     }
 
+    // ---------------------------------------------------------------------
+    // 主要角色 vs NPC 精细化判定
+    // ---------------------------------------------------------------------
+
+    // 从角色卡本体 + 世界书里收集「主要角色候选名字」
+    // 角色卡：context.characters 的 name / alternative_names
+    // 世界书：context.worldInfo 的 entries 里 keys 数组（关键词通常是角色名）
+    function collectMainCharacterNames() {
+        const ctx = getSTContext();
+        const names = new Set();
+
+        // 1) 角色卡本体
+        if (Array.isArray(ctx?.characters)) {
+            for (const ch of ctx.characters) {
+                if (!ch) continue;
+                if (ch.name) names.add(String(ch.name).trim());
+                if (Array.isArray(ch.alternative_names)) {
+                    ch.alternative_names.forEach((n) => n && names.add(String(n).trim()));
+                }
+            }
+        }
+
+        // 2) 世界书 entries 的 keys（世界书里的角色名/关键概念）
+        const wi = ctx?.worldInfo;
+        const entries = (wi && (wi.entries || wi.worldInfo || wi)) || [];
+        if (Array.isArray(entries)) {
+            for (const e of entries) {
+                if (!e) continue;
+                if (Array.isArray(e.keys)) {
+                    e.keys.forEach((k) => k && names.add(String(k).trim()));
+                }
+                if (Array.isArray(e.key)) {
+                    e.key.forEach((k) => k && names.add(String(k).trim()));
+                }
+                // 兼容某些版本用 keyword 字段
+                if (Array.isArray(e.keywords)) {
+                    e.keywords.forEach((k) => k && names.add(String(k).trim()));
+                }
+            }
+        }
+
+        // 去掉空串和过短的名字（单个字符可能是误报）
+        return [...names].filter((n) => n && n.length >= 1);
+    }
+
+    // 统计某个名字在正文对话里出现的次数
+    function countNameFrequency(name, chat) {
+        if (!name || !Array.isArray(chat)) return 0;
+        let count = 0;
+        for (const m of chat) {
+            const txt = String(m?.mes || m?.content || '');
+            if (txt.includes(name)) count++;
+        }
+        return count;
+    }
+
+    // 判断一个名字是否应视为「主要角色」：
+    // 在角色卡/世界书里出现过，且在正文对话里反复出现（≥ 阈值）→ 主要角色
+    // 否则 → NPC（角色卡里没写，或正文出现频率极低）
+    function isMainCharacter(name, chat) {
+        if (!name) return false;
+        const mainNames = collectMainCharacterNames();
+        // 名字命中主要角色候选（精确匹配，或候选是名字的一部分）
+        const inCardOrWorld = mainNames.some((mn) => {
+            const a = mn.toLowerCase();
+            const b = name.toLowerCase();
+            return a === b || a.includes(b) || b.includes(a);
+        });
+        if (!inCardOrWorld) return false;
+        // 正文里反复出现（默认阈值 2 次，可在 meta 里调整）
+        const freq = countNameFrequency(name, chat);
+        const threshold = 2;
+        return freq >= threshold;
+    }
+
     function removeNpc(agentId, npcName) {
         const mem = getCharacterMemory(agentId);
         if (mem.npcs && mem.npcs[npcName]) {
@@ -406,6 +601,133 @@
     function setSetting(key, value) {
         getSettings()[key] = value;
         saveSettings();
+    }
+
+    // 获取当前主题配置（带兜底）
+    function getTheme() {
+        const key = getSettings().theme || 'default';
+        return THEMES[key] || THEMES.default;
+    }
+
+    // 应用主题：把主题色写入 CSS 变量（挂到 :root，供面板所有元素引用）
+    function applyTheme(key) {
+        if (!key || !THEMES[key]) key = 'default';
+        setSetting('theme', key);
+        const t = THEMES[key];
+        const root = document.documentElement;
+        root.style.setProperty('--ltm-accent', t.accent);
+        root.style.setProperty('--ltm-accent-dark', t.accentDark);
+        root.style.setProperty('--ltm-accent-deep', t.accentDeep);
+        root.style.setProperty('--ltm-gold', t.gold);
+        root.style.setProperty('--ltm-bg', t.bg);
+        root.style.setProperty('--ltm-bg2', t.bg2);
+        root.style.setProperty('--ltm-aux', t.aux);
+        root.style.setProperty('--ltm-text', t.text);
+    }
+
+    // ---------------------------------------------------------------------
+    // 记忆导入 / 导出
+    // ---------------------------------------------------------------------
+    const MEMORY_EXPORT_VERSION = '2.2.0';
+
+    // 导出当前角色的完整记忆为 JSON 文件下载
+    function exportMemory() {
+        const agentId = getAgentId();
+        if (!agentId) {
+            toastr?.warning?.('记忆宫殿：请先选择角色卡');
+            return;
+        }
+        const mem = getCharacterMemory(agentId);
+        const payload = {
+            plugin: 'memory-palace',
+            version: MEMORY_EXPORT_VERSION,
+            exported_at: new Date().toISOString(),
+            agentId: agentId,
+            charName: getCharName(),
+            memory: mem,
+        };
+        const json = JSON.stringify(payload, null, 2);
+        const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const safeName = String(getCharName() || '角色').replace(/[\\/:*?"<>|]/g, '_');
+        a.href = url;
+        a.download = `记忆宫殿_${safeName}_${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        toastr?.success?.(`记忆宫殿：已导出「${getCharName()}」的完整记忆`);
+    }
+
+    // 导入记忆：读取 JSON 文件，正确归属到当前角色分区，不乱码不串台
+    function importMemory(file) {
+        if (!file) return;
+        const agentId = getAgentId();
+        if (!agentId) {
+            toastr?.warning?.('记忆宫殿：请先选择角色卡');
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+            try {
+                const data = JSON.parse(reader.result);
+                // 兼容两种结构：带外层包装 {memory:...} 或直接的记忆对象
+                const mem = data && data.memory ? data.memory : data;
+                if (!mem || typeof mem !== 'object') {
+                    throw new Error('文件内容不是有效的记忆数据');
+                }
+
+                // 分区白名单：只导入合法分区，防止杂数据污染
+                const PARTITIONS_KEYS = [
+                    'emotional_tags', 'key_events', 'special_occasions',
+                    'character_diary', 'emotion_flow', 'todos', 'important_items',
+                ];
+                const target = getCharacterMemory(agentId);
+                for (const key of PARTITIONS_KEYS) {
+                    if (Array.isArray(mem[key])) {
+                        target[key] = mem[key];
+                    }
+                }
+                // NPC 库：逐个导入（对象结构，键为 NPC 名）
+                if (mem.npcs && typeof mem.npcs === 'object') {
+                    target.npcs = {};
+                    for (const npcName in mem.npcs) {
+                        const nm = mem.npcs[npcName];
+                        if (nm && typeof nm === 'object') {
+                            target.npcs[npcName] = nm;
+                            if (nm.meta && !nm.meta.name) nm.meta.name = npcName;
+                        }
+                    }
+                }
+                // meta：保留目标原有的 meta（楼层计数、flow 标记等不随导入覆盖）
+                target.meta = target.meta || {};
+                target.meta.updated_at = Date.now();
+                saveSettings();
+                renderCurrentView();
+                toastr?.success?.(`记忆宫殿：已导入「${getCharName()}」的记忆（${MEMORY_EXPORT_VERSION}）`);
+            } catch (err) {
+                console.warn('[记忆宫殿] 导入失败：', err);
+                toastr?.error?.('记忆宫殿：导入失败，' + (err?.message || '文件格式不正确'));
+            }
+        };
+        reader.onerror = () => {
+            toastr?.error?.('记忆宫殿：文件读取失败');
+        };
+        reader.readAsText(file, 'utf-8');
+    }
+
+    // 触发文件选择框
+    function triggerImport() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json';
+        input.onchange = () => {
+            if (input.files && input.files[0]) {
+                importMemory(input.files[0]);
+            }
+        };
+        input.click();
     }
 
     function getGroupCharNames() {
@@ -514,34 +836,55 @@
     // 独立 API 生成（可选）：用户配置外部 API 后，总结改走外部接口
     async function generateViaExternalApi(prompt, systemPrompt = null) {
         const settings = getSettings();
-        const url = settings.externalApiUrl;
-        const key = settings.externalApiKey;
-        const model = settings.externalApiModel;
+        let url = (settings.externalApiUrl || '').trim();
+        const key = (settings.externalApiKey || '').trim();
+        const model = (settings.externalApiModel || '').trim();
 
         if (!url) {
             throw new Error('未配置外部 API 地址');
         }
 
+        // URL 规范化：用户可能填的是 base URL（如 https://xxx.com/v1）而非完整
+        // chat/completions 地址。若 URL 不以 /chat/completions 结尾，自动补全。
+        // 这能修复「能拉模型列表、但总结报错」的问题——拉列表走 /models 能凑对，
+        // 但 POST 打到 base URL 上会 404/405。
+        if (!/\/chat\/completions\/?$/i.test(url)) {
+            url = url.replace(/\/+$/, '') + '/chat/completions';
+        }
+
         const merged = systemPrompt ? `${systemPrompt}\n\n---\n\n${prompt}` : prompt;
 
         const body = {
-            model: model || 'gpt-3.5-turbo',
             messages: [
                 { role: 'user', content: merged },
             ],
         };
+        // 只有填了 model 才带 model 字段（有些网关不填 model 也能跑）
+        if (model) body.model = model;
 
         const headers = { 'Content-Type': 'application/json' };
         if (key) headers['Authorization'] = `Bearer ${key}`;
 
-        const resp = await fetch(url, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(body),
-        });
+        let resp;
+        try {
+            resp = await fetch(url, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(body),
+            });
+        } catch (e) {
+            // 网络层错误（地址不通、CORS、域名解析失败等）
+            throw new Error(`无法连接外部 API（${e?.message || '网络错误'}）。请检查地址是否可访问、是否需走代理。`);
+        }
 
         if (!resp.ok) {
-            throw new Error(`外部 API 请求失败：HTTP ${resp.status}`);
+            // 尽量提取 API 返回的错误详情，方便定位
+            let detail = '';
+            try {
+                const errData = await resp.json();
+                detail = errData?.error?.message || errData?.message || errData?.error || '';
+            } catch (_) { /* 忽略 */ }
+            throw new Error(`外部 API 请求失败：HTTP ${resp.status}${detail ? ' — ' + detail : ''}`);
         }
 
         const data = await resp.json();
@@ -555,6 +898,12 @@
         }
         if (typeof data.content === 'string') {
             return data.content;
+        }
+        // 兜底：尝试其他常见字段
+        if (data.output_text) return data.output_text;
+        if (data.output && Array.isArray(data.output)) {
+            const txt = data.output.filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+            if (txt) return txt;
         }
         return '';
     }
@@ -688,8 +1037,13 @@
         if (Array.isArray(data.todos)) addToPartition(agentId, 'todos', data.todos);
         if (Array.isArray(data.important_items)) addToPartition(agentId, 'important_items', data.important_items);
         if (Array.isArray(data.npc)) {
+            const chat = getSTContext()?.chat || [];
             for (const name of data.npc) {
-                if (name && name.trim()) ensureNpcMemory(agentId, name.trim());
+                const nm = name && name.trim();
+                if (!nm) continue;
+                // 主要角色判定：角色卡/世界书出现 + 正文反复出现 → 跳过，不建 NPC 档
+                if (isMainCharacter(nm, chat)) continue;
+                ensureNpcMemory(agentId, nm);
             }
         }
 
@@ -701,13 +1055,14 @@
     function applySummaryData(agentId, data) {
         if (!data || typeof data !== 'object') return false;
 
-        // 关键事件（对象结构，带 keywords + emotions）
+        // 关键事件（对象结构，带 date + keywords + emotions）
         if (Array.isArray(data.key_events)) {
             for (const ev of data.key_events) {
                 if (typeof ev === 'string') {
-                    addToPartition(agentId, 'key_events', { content: ev, keywords: [], emotions: [] });
+                    addToPartition(agentId, 'key_events', { date: '', content: ev, keywords: [], emotions: [] });
                 } else if (ev && typeof ev === 'object' && ev.content) {
                     addToPartition(agentId, 'key_events', {
+                        date: ev.date || '',
                         content: String(ev.content),
                         keywords: Array.isArray(ev.keywords) ? ev.keywords.map(String) : [],
                         emotions: Array.isArray(ev.emotions) ? ev.emotions.map(String) : [],
@@ -730,27 +1085,32 @@
             }
         }
 
-        // 情感流转（含好感度 + 关系定位）
+        // 情感流转（含好感度 + 关系定位 + 具体日期区间）
         if (Array.isArray(data.emotion_flow)) {
             for (const f of data.emotion_flow) {
                 if (typeof f === 'string') {
-                    addToPartition(agentId, 'emotion_flow', { content: f, affection: '', relationship: '' });
+                    addToPartition(agentId, 'emotion_flow', { content: f, affection: '', relationship: '', date: '' });
                 } else if (f && typeof f === 'object') {
                     addToPartition(agentId, 'emotion_flow', {
                         content: f.content || '',
                         affection: f.affection || '',
                         relationship: f.relationship || '',
+                        date: f.date || '',
                     });
                 }
             }
         }
 
         if (Array.isArray(data.special_occasions)) addToPartition(agentId, 'special_occasions', data.special_occasions);
-        if (Array.isArray(data.todos)) addToPartition(agentId, 'todos', data.todos);
-        if (Array.isArray(data.important_items)) addToPartition(agentId, 'important_items', data.important_items);
+        // 待办去重 + 完成态合并（避免跨楼层重复、已完成被记成未完成）
+        if (Array.isArray(data.todos)) mergeTodos(agentId, data.todos);
+        // 重要物品去重（避免同一物品被误判为不同物品重复记录）
+        if (Array.isArray(data.important_items)) mergeImportantItems(agentId, data.important_items);
 
         // NPC：解析 {name, identity, brief} 结构，命名「名字-身份」，记忆简略
+        // 但先做主要角色判定：角色卡/世界书里出现过且正文反复出现的，视作主要角色，不建 NPC 档。
         if (Array.isArray(data.npc)) {
+            const chat = getSTContext()?.chat || [];
             for (const n of data.npc) {
                 let npcName = null;
                 let identity = '';
@@ -763,6 +1123,12 @@
                     brief = (n.brief || '').trim();
                 }
                 if (!npcName) continue;
+
+                // 主要角色判定：命中角色卡/世界书且正文反复出现 → 跳过（不当作 NPC）
+                if (isMainCharacter(npcName, chat)) {
+                    log(`[记忆宫殿] 「${npcName}」判定为主要角色，跳过 NPC 建档`);
+                    continue;
+                }
 
                 const npcMem = ensureNpcMemory(agentId, npcName, identity);
                 // NPC 记忆尽量简略：brief 作为关键事件存一条
@@ -916,8 +1282,9 @@
             renderCurrentView();
         } catch (err) {
             console.warn('[记忆宫殿] 一键总结失败：', err);
-            setStatus('<i class="fa-solid fa-triangle-exclamation"></i> 总结失败。', true);
-            toastr.error('记忆宫殿：总结失败，请检查模型是否可用');
+            const reason = err?.message || '请检查模型是否可用';
+            setStatus('<i class="fa-solid fa-triangle-exclamation"></i> 总结失败：' + esc(reason), true);
+            toastr.error('记忆宫殿：总结失败，' + reason);
         }
     }
 
@@ -927,7 +1294,7 @@
         const out = await generateWithRetry(prompt.user, system);
         const todos = parseJsonFromText(out);
         if (Array.isArray(todos) && todos.length) {
-            addToPartition(agentId, 'todos', todos);
+            mergeTodos(agentId, todos);
         }
     }
 
@@ -945,7 +1312,7 @@
         const out = await generateWithRetry(prompt.user, system);
         const todos = parseJsonFromText(out);
         if (Array.isArray(todos) && todos.length) {
-            addToPartition(agentId, 'todos', todos);
+            mergeTodos(agentId, todos);
         }
 
         const pending = mem.todos.filter((t) => !(t && t.done));
@@ -1056,7 +1423,8 @@
             const eventText = relevant.map((ev) => {
                 const kw = (ev.keywords || []).join('/');
                 const em = (ev.emotions || []).join('/');
-                const tag = [kw, em].filter(Boolean).join(' · ');
+                const dt = ev.date ? `[${ev.date}]` : '';
+                const tag = [dt, kw, em].filter(Boolean).join(' · ');
                 return tag ? `${ev.content}（${tag}）` : ev.content;
             }).join('；');
             parts.push(`相关记忆事件：${eventText}`);
@@ -1083,6 +1451,7 @@
                 const latest = flows[flows.length - 1];
                 if (typeof latest === 'object') {
                     const flowParts = [];
+                    if (latest.date) flowParts.push(`阶段：${latest.date}`);
                     if (latest.content) flowParts.push(latest.content);
                     if (latest.affection) flowParts.push(`好感度：${latest.affection}`);
                     if (latest.relationship) flowParts.push(`关系定位：${latest.relationship}`);
@@ -1228,37 +1597,53 @@
         if (document.getElementById('ltm-panel-style')) return;
         const style = document.createElement('style');
         style.id = 'ltm-panel-style';
+        // 主题变量：默认值，applyTheme() 会动态覆盖（挂到 #ltm-panel-drawer 上）
+        const theme = getTheme();
         style.textContent = `
-#ltm-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:30000;width:52px;height:52px;cursor:grab;user-select:none;-webkit-user-select:none;transition:transform .2s ease,right .25s ease;touch-action:none;}
+:root{
+--ltm-accent:${theme.accent};
+--ltm-accent-dark:${theme.accentDark};
+--ltm-accent-deep:${theme.accentDeep};
+--ltm-gold:${theme.gold};
+--ltm-bg:${theme.bg};
+--ltm-bg2:${theme.bg2};
+--ltm-aux:${theme.aux};
+--ltm-text:${theme.text};
+}
+#ltm-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:30000;width:52px;height:52px;cursor:grab;user-select:none;-webkit-user-select:none;transition:transform .2s ease,right .3s ease,left .3s ease,opacity .2s ease;touch-action:none;}
 #ltm-fab.ltm-fab-hidden{opacity:0;pointer-events:none;}
-#ltm-fab .ltm-fab-ball{width:100%;height:100%;border-radius:14px;background:linear-gradient(135deg,#8c1c1c,#5e1010);border:1px solid rgba(201,168,106,.6);box-shadow:0 2px 12px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:#f6f1e6;font-size:22px;transition:all .25s ease;position:relative;}
-#ltm-fab .ltm-fab-label{position:absolute;right:56px;top:50%;transform:translateY(-50%);white-space:nowrap;background:rgba(94,16,16,.9);color:#f6f1e6;font-size:12px;padding:4px 10px;border-radius:8px;opacity:0;pointer-events:none;transition:opacity .2s ease;}
+#ltm-fab .ltm-fab-ball{width:100%;height:100%;border-radius:14px;background:linear-gradient(135deg,var(--ltm-accent),var(--ltm-accent-dark));border:1px solid rgba(201,168,106,.6);box-shadow:0 2px 12px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:var(--ltm-bg);font-size:22px;transition:all .25s ease;position:relative;}
+#ltm-fab .ltm-fab-label{position:absolute;right:56px;top:50%;transform:translateY(-50%);white-space:nowrap;background:var(--ltm-accent-dark);color:var(--ltm-bg);font-size:12px;padding:4px 10px;border-radius:8px;opacity:0;pointer-events:none;transition:opacity .2s ease;}
 #ltm-fab:hover .ltm-fab-label{opacity:1;}
-#ltm-fab.ltm-fab-collapsed{right:-39px;}
-#ltm-fab.ltm-fab-collapsed:hover,#ltm-fab.ltm-fab-collapsed.ltm-fab-dragging{right:0;}
+/* 缩进态：吸附到右侧，只露出左侧一小条半透明边边 */
+#ltm-fab.ltm-fab-collapsed[data-side="right"]{right:-44px;opacity:.55;}
+#ltm-fab.ltm-fab-collapsed[data-side="left"]{left:-44px;right:auto;opacity:.55;}
+#ltm-fab.ltm-fab-collapsed:hover,#ltm-fab.ltm-fab-collapsed.ltm-fab-dragging{opacity:1;}
+#ltm-fab.ltm-fab-collapsed[data-side="right"]:hover,#ltm-fab.ltm-fab-collapsed[data-side="right"].ltm-fab-dragging{right:0;}
+#ltm-fab.ltm-fab-collapsed[data-side="left"]:hover,#ltm-fab.ltm-fab-collapsed[data-side="left"].ltm-fab-dragging{left:0;}
 #ltm-panel-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.35);z-index:29999;opacity:0;pointer-events:none;transition:opacity .25s ease;}
 #ltm-panel-overlay.ltm-open{opacity:1;pointer-events:auto;}
-#ltm-panel-drawer{position:fixed;top:0;right:0;bottom:0;width:460px;max-width:92vw;height:100vh;height:100dvh;z-index:30002;background-color:#f6f1e6;background-image:linear-gradient(160deg,#f6f1e6,#efe6d3);border-left:1px solid rgba(140,28,28,.25);box-shadow:-6px 0 24px rgba(0,0,0,.25);transform:translateX(105%);transition:transform .3s cubic-bezier(.22,1,.36,1);display:flex;flex-direction:column;color:#3a2f2a;box-sizing:border-box;overflow:hidden;font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;max-height:100vh;max-height:100dvh;}
+#ltm-panel-drawer{position:fixed;top:0;right:0;bottom:0;width:460px;max-width:92vw;height:100vh;height:100dvh;z-index:30002;background-color:var(--ltm-bg);background-image:linear-gradient(160deg,var(--ltm-bg),var(--ltm-bg2));border-left:1px solid rgba(140,28,28,.25);box-shadow:-6px 0 24px rgba(0,0,0,.25);transform:translateX(105%);transition:transform .3s cubic-bezier(.22,1,.36,1);display:flex;flex-direction:column;color:var(--ltm-text);box-sizing:border-box;overflow:hidden;font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;max-height:100vh;max-height:100dvh;}
 #ltm-panel-drawer.ltm-open{transform:translateX(0);}
-.ltm-drawer-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:linear-gradient(120deg,rgba(94,16,16,.9),rgba(140,28,28,.85));border-bottom:1px solid rgba(255,255,255,.15);color:#f6f1e6;flex-shrink:0;min-height:52px;}
+.ltm-drawer-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:linear-gradient(120deg,var(--ltm-accent-dark),var(--ltm-accent));border-bottom:1px solid rgba(255,255,255,.15);color:var(--ltm-bg);flex-shrink:0;min-height:52px;}
 .ltm-drawer-logo{font-weight:700;font-size:1.15rem;letter-spacing:.06em;display:flex;align-items:center;gap:8px;}
-.ltm-drawer-logo i{color:#c9a86a;}
-.ltm-drawer-close{background:none;border:1px solid rgba(255,255,255,.3);border-radius:50%;width:30px;height:30px;color:#f6f1e6;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.ltm-drawer-logo i{color:var(--ltm-gold);}
+.ltm-drawer-close{background:none;border:1px solid rgba(255,255,255,.3);border-radius:50%;width:30px;height:30px;color:var(--ltm-bg);cursor:pointer;display:flex;align-items:center;justify-content:center;}
 .ltm-nav-tabs{display:flex;flex-wrap:wrap;gap:6px;padding:10px 16px;border-bottom:1px solid rgba(140,28,28,.2);flex-shrink:0;background:rgba(255,255,255,.25);}
 .ltm-nav-tab{font-size:.8rem;font-weight:600;color:rgba(58,47,42,.7);background:transparent;border:1px solid transparent;padding:6px 13px;border-radius:999px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;}
-.ltm-nav-tab.ltm-active{background:rgba(140,28,28,.9);color:#f6f1e6;border-color:#c9a86a;}
+.ltm-nav-tab.ltm-active{background:var(--ltm-accent);color:var(--ltm-bg);border-color:var(--ltm-gold);}
 .ltm-drawer-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:16px 16px 80px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;-webkit-overflow-scroll-behavior:contain;touch-action:pan-y;}
-.ltm-card{background:rgba(255,255,255,.55);border:1px solid rgba(140,28,28,.25);border-top:3px solid #8c1c1c;border-radius:12px;padding:14px;margin-bottom:14px;box-sizing:border-box;}
-.ltm-card-title{font-weight:700;font-size:1rem;display:flex;align-items:center;justify-content:space-between;gap:8px;padding-bottom:10px;margin-bottom:12px;border-bottom:1px dashed rgba(140,28,28,.25);color:#5e1010;}
-.ltm-card-title i{color:#c9a86a;}
+.ltm-card{background:rgba(255,255,255,.55);border:1px solid rgba(140,28,28,.25);border-top:3px solid var(--ltm-accent);border-radius:12px;padding:14px;margin-bottom:14px;box-sizing:border-box;}
+.ltm-card-title{font-weight:700;font-size:1rem;display:flex;align-items:center;justify-content:space-between;gap:8px;padding-bottom:10px;margin-bottom:12px;border-bottom:1px dashed rgba(140,28,28,.25);color:var(--ltm-accent-dark);}
+.ltm-card-title i{color:var(--ltm-gold);}
 .ltm-title-left{display:inline-flex;align-items:center;gap:8px;}
-.ltm-field-label{display:block;font-size:.8rem;font-weight:600;margin:12px 0 6px;color:#5e1010;}
-.ltm-input,.ltm-textarea{width:100%;box-sizing:border-box;font-size:.85rem;color:#3a2f2a;background:rgba(255,255,255,.65);border:1px solid rgba(140,28,28,.25);border-radius:8px;padding:9px 12px;resize:vertical;outline:none;}
-.ltm-btn{font-weight:600;background:#8c1c1c;color:#f6f1e6;border:1px solid #5e1010;border-radius:8px;padding:7px 16px;cursor:pointer;font-size:.82rem;white-space:nowrap;}
-.ltm-btn-ghost{background:transparent;color:#5e1010;border:1px solid rgba(140,28,28,.35);}
-.ltm-btn-danger{background:transparent;color:#b23a2a;border:1px solid rgba(178,58,42,.4);}
+.ltm-field-label{display:block;font-size:.8rem;font-weight:600;margin:12px 0 6px;color:var(--ltm-accent-dark);}
+.ltm-input,.ltm-textarea{width:100%;box-sizing:border-box;font-size:.85rem;color:var(--ltm-text);background:rgba(255,255,255,.65);border:1px solid rgba(140,28,28,.25);border-radius:8px;padding:9px 12px;resize:vertical;outline:none;}
+.ltm-btn{font-weight:600;background:var(--ltm-accent);color:var(--ltm-bg);border:1px solid var(--ltm-accent-dark);border-radius:8px;padding:7px 16px;cursor:pointer;font-size:.82rem;white-space:nowrap;}
+.ltm-btn-ghost{background:transparent;color:var(--ltm-accent-dark);border:1px solid rgba(140,28,28,.35);}
+.ltm-btn-danger{background:transparent;color:var(--ltm-accent-deep);border:1px solid rgba(178,58,42,.4);}
 .ltm-btn-sm{padding:3px 10px;font-size:.75rem;border-radius:6px;}
-.ltm-btn-add{margin-top:10px;background:transparent;border:1px dashed #8c1c1c;color:#5e1010;border-radius:8px;padding:7px 16px;font-size:.8rem;cursor:pointer;width:100%;}
+.ltm-btn-add{margin-top:10px;background:transparent;border:1px dashed var(--ltm-accent);color:var(--ltm-accent-dark);border-radius:8px;padding:7px 16px;font-size:.8rem;cursor:pointer;width:100%;}
 .ltm-item{display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px dashed rgba(140,28,28,.18);}
 .ltm-item-text{flex:1;word-break:break-word;font-size:.85rem;line-height:1.5;min-width:0;}
 .ltm-item-text[contenteditable="true"]{outline:none;cursor:text;}
@@ -1267,37 +1652,42 @@
 .ltm-done .ltm-item-text{text-decoration:line-through;color:#a0938a;}
 .ltm-tag-list{display:flex;flex-wrap:wrap;gap:8px;}
 .ltm-tag{font-size:.8rem;background:rgba(201,168,106,.2);border:1px solid rgba(201,168,106,.5);color:#7a5c3e;border-radius:999px;padding:4px 12px;display:inline-flex;align-items:center;gap:6px;}
-.ltm-tag .ltm-tag-del{cursor:pointer;color:#b23a2a;font-weight:700;}
+.ltm-tag .ltm-tag-del{cursor:pointer;color:var(--ltm-accent-deep);font-weight:700;}
 .ltm-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;}
 .ltm-char-card,.ltm-item-card{background:rgba(255,255,255,.55);border:1px solid rgba(140,28,28,.25);border-radius:12px;padding:12px;text-align:center;cursor:pointer;position:relative;}
-.ltm-char-icon,.ltm-item-icon{font-size:1.5rem;color:#8c1c1c;margin-bottom:6px;}
-.ltm-char-name{font-size:.82rem;font-weight:600;color:#3a2f2a;}
-.ltm-item-name{font-size:.82rem;font-weight:700;color:#5e1010;outline:none;margin-bottom:4px;}
+.ltm-char-icon,.ltm-item-icon{font-size:1.5rem;color:var(--ltm-accent);margin-bottom:6px;}
+.ltm-char-name{font-size:.82rem;font-weight:600;color:var(--ltm-text);}
+.ltm-item-name{font-size:.82rem;font-weight:700;color:var(--ltm-accent-dark);outline:none;margin-bottom:4px;}
 .ltm-item-desc{font-size:.72rem;color:#7a6a5f;outline:none;line-height:1.4;}
-.ltm-card-delete{position:absolute;top:6px;right:6px;background:none;border:none;color:#b23a2a;cursor:pointer;font-size:.85rem;}
-.ltm-add-card{display:flex;align-items:center;justify-content:center;border-style:dashed;color:#8c1c1c;font-size:1.4rem;cursor:pointer;min-height:70px;}
+.ltm-card-delete{position:absolute;top:6px;right:6px;background:none;border:none;color:var(--ltm-accent-deep);cursor:pointer;font-size:.85rem;}
+.ltm-add-card{display:flex;align-items:center;justify-content:center;border-style:dashed;color:var(--ltm-accent);font-size:1.4rem;cursor:pointer;min-height:70px;}
 .ltm-prompt-item{margin-bottom:16px;border-bottom:1px dashed rgba(140,28,28,.2);padding-bottom:14px;}
 .ltm-prompt-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
-.ltm-prompt-name{font-weight:700;font-size:.9rem;color:#5e1010;}
+.ltm-prompt-name{font-weight:700;font-size:.9rem;color:var(--ltm-accent-dark);}
 .ltm-hint{font-size:.78rem;color:#7a5c3e;background:rgba(201,168,106,.16);border:1px solid rgba(201,168,106,.35);border-radius:8px;padding:8px 10px;margin:12px 0;line-height:1.5;}
 .ltm-switch-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px dashed rgba(140,28,28,.15);font-size:.88rem;}
 .ltm-switch{position:relative;width:44px;height:24px;flex-shrink:0;}
 .ltm-switch input{opacity:0;width:0;height:0;}
 .ltm-switch .ltm-slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.2);border-radius:999px;transition:.25s;}
 .ltm-switch .ltm-slider::before{content:"";position:absolute;height:18px;width:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.25s;}
-.ltm-switch input:checked+.ltm-slider{background:#8c1c1c;}
+.ltm-switch input:checked+.ltm-slider{background:var(--ltm-accent);}
 .ltm-switch input:checked+.ltm-slider::before{transform:translateX(20px);}
 .ltm-pill-group{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;}
-.ltm-pill{flex:1;min-width:60px;font-weight:600;font-size:.85rem;background:rgba(255,255,255,.5);border:1px solid rgba(140,28,28,.25);color:#3a2f2a;border-radius:999px;padding:7px 0;cursor:pointer;text-align:center;}
-.ltm-pill.ltm-active{background:#8c1c1c;color:#f6f1e6;border-color:#5e1010;}
+.ltm-pill{flex:1;min-width:60px;font-weight:600;font-size:.85rem;background:rgba(255,255,255,.5);border:1px solid rgba(140,28,28,.25);color:var(--ltm-text);border-radius:999px;padding:7px 0;cursor:pointer;text-align:center;}
+.ltm-pill.ltm-active{background:var(--ltm-accent);color:var(--ltm-bg);border-color:var(--ltm-accent-dark);}
 .ltm-event-meta{display:flex;align-items:center;gap:6px;font-size:.75rem;}
-.ltm-meta-label{flex-shrink:0;color:#8c1c1c;font-weight:700;background:rgba(201,168,106,.2);border:1px solid rgba(201,168,106,.4);border-radius:6px;padding:1px 7px;}
+.ltm-meta-label{flex-shrink:0;color:var(--ltm-accent);font-weight:700;background:rgba(201,168,106,.2);border:1px solid rgba(201,168,106,.4);border-radius:6px;padding:1px 7px;}
 .ltm-meta-val{flex:1;color:#5a4a3f;outline:none;border-bottom:1px dashed rgba(140,28,28,.2);padding:1px 2px;min-width:0;word-break:break-all;}
-.ltm-diary-date{font-size:.72rem;color:#8c1c1c;font-weight:700;outline:none;}
-.ltm-affection{font-size:.75rem;color:#b23a2a;font-weight:600;outline:none;}
+.ltm-diary-date{font-size:.72rem;color:var(--ltm-accent);font-weight:700;outline:none;}
+.ltm-affection{font-size:.75rem;color:var(--ltm-accent-deep);font-weight:600;outline:none;}
 .ltm-model-row{display:flex;gap:8px;align-items:center;}
 .ltm-model-row .ltm-input{flex:1;min-width:0;}
 .ltm-model-row .ltm-btn{flex-shrink:0;}
+.ltm-theme-row{display:flex;gap:14px;align-items:center;padding:6px 0;}
+.ltm-theme-dot{width:38px;height:38px;border-radius:50%;cursor:pointer;border:3px solid transparent;box-shadow:0 0 0 1px rgba(0,0,0,.15);transition:transform .15s ease,border-color .15s ease;flex-shrink:0;}
+.ltm-theme-dot:hover{transform:scale(1.1);}
+.ltm-theme-dot.ltm-active{border-color:var(--ltm-accent-dark);box-shadow:0 0 0 2px var(--ltm-accent),0 0 0 1px rgba(0,0,0,.15);}
+.ltm-theme-name{font-size:.8rem;color:var(--ltm-text);}
 @media(max-width:640px){#ltm-panel-drawer{width:100vw;max-width:100vw;height:100vh;height:100dvh;max-height:100vh;max-height:100dvh;}.ltm-grid{grid-template-columns:1fr 1fr;}.ltm-nav-tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;}.ltm-drawer-body{padding-bottom:calc(80px + env(safe-area-inset-bottom,0px));}}
         `;
         document.head.appendChild(style);
@@ -1311,14 +1701,14 @@
         const shell = document.createElement('div');
         shell.style.cssText = 'all:initial;';
         shell.innerHTML = `
-        <div id="ltm-fab" class="ltm-fab-collapsed" title="记忆宫殿">
+        <div id="ltm-fab" class="ltm-fab-collapsed" data-side="right" title="记忆宫殿">
             <div class="ltm-fab-ball"><i class="fa-solid fa-landmark"></i></div>
             <div class="ltm-fab-label">记忆宫殿</div>
         </div>
         <div id="ltm-panel-overlay"></div>
         <aside id="ltm-panel-drawer" style="background-color:#f6f1e6;background-image:linear-gradient(160deg,#f6f1e6,#efe6d3);">
             <div class="ltm-drawer-head">
-                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 · MEMORY PALACE</div>
+                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v2.3.0</span></div>
                 <button class="ltm-drawer-close" id="ltm-panel-close"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="ltm-nav-tabs" id="ltm-nav-tabs">
@@ -1371,6 +1761,25 @@
         let moved = false;
         let startX = 0, startY = 0, origX = 0, origY = 0;
 
+        const snapToEdge = (shouldCollapse) => {
+            const rect = fab.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const side = centerX < window.innerWidth / 2 ? 'left' : 'right';
+            fab.dataset.side = side;
+            // 先清除内联 left/right/top，让 CSS 接管吸附位置
+            fab.style.left = '';
+            fab.style.right = '';
+            fab.style.top = '';
+            fab.style.transform = '';
+            if (shouldCollapse) {
+                fab.classList.add('ltm-fab-collapsed');
+            } else {
+                fab.classList.remove('ltm-fab-collapsed');
+            }
+            // 保存吸附位置到内存（供后续恢复）
+            fab._ltmSide = side;
+        };
+
         const onStart = (clientX, clientY) => {
             dragging = true;
             moved = false;
@@ -1382,6 +1791,7 @@
             fab.classList.add('ltm-fab-dragging');
             fab.classList.remove('ltm-fab-collapsed');
             fab.style.transition = 'none';
+            fab.style.opacity = '1';
         };
 
         const onMove = (clientX, clientY) => {
@@ -1406,16 +1816,12 @@
             dragging = false;
             fab.classList.remove('ltm-fab-dragging');
             fab.style.transition = '';
-            if (!moved) return;
-            const rect = fab.getBoundingClientRect();
-            const centerX = rect.left + rect.width / 2;
-            if (centerX < window.innerWidth / 2) {
-                fab.style.left = '0';
-                fab.style.right = 'auto';
-            } else {
-                fab.style.left = 'auto';
-                fab.style.right = '0';
+            if (!moved) {
+                // 没拖拽（纯点击）：如果当前是缩进态，点击后展开但不缩进（交给 click 处理打开面板）
+                return;
             }
+            // 拖拽过：松手后吸附到最近边缘并缩进，只露半透明小边边
+            snapToEdge(true);
         };
 
         fab.addEventListener('mousedown', (e) => {
@@ -1437,12 +1843,18 @@
         }, { passive: true });
         document.addEventListener('touchend', onEnd);
 
+        // 点击（非拖拽）时的行为：
+        // - 缩进态：点击小边边 → 先展开（去缩进），打开面板
+        // - 展开态：点击 → 打开面板
         fab.addEventListener('click', (e) => {
             if (moved) {
                 e.stopPropagation();
                 e.preventDefault();
                 moved = false;
+                return;
             }
+            // 点击时展开悬浮球（去掉缩进，避免被半透明边边挡住）
+            fab.classList.remove('ltm-fab-collapsed');
         }, true);
     }
 
@@ -1598,9 +2010,11 @@
             }
             const keywords = (item.keywords || []).join('、');
             const emotions = (item.emotions || []).join('、');
+            const evDate = item.date || '';
             return `
             <div class="ltm-item ltm-event-item">
                 <div class="ltm-item-text" style="flex-direction:column;display:flex;gap:5px;">
+                    <div class="ltm-diary-date" contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="date" data-npc="${npcAttr}">${esc(evDate || '（点此填年月日，如 2036.4.19）')}</div>
                     <div contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="content" data-npc="${npcAttr}">${esc(item.content || '')}</div>
                     <div class="ltm-event-meta">
                         <span class="ltm-meta-label">关键词</span>
@@ -1654,9 +2068,11 @@
             }
             const affection = item.affection || '';
             const relationship = item.relationship || '';
+            const flowDate = item.date || '';
             return `
             <div class="ltm-item">
                 <div class="ltm-item-text" style="flex-direction:column;display:flex;gap:3px;">
+                    <div class="ltm-diary-date" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="date" data-npc="${npcAttr}">${esc(flowDate || '（点此填日期区间，如 2036.4.1-2036.4.19）')}</div>
                     <div contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="content" data-npc="${npcAttr}">${esc(item.content || '')}</div>
                     <div class="ltm-affection" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="affection" data-npc="${npcAttr}">${esc(affection ? '好感度：' + affection : '（点击填好感度）')}</div>
                     <div class="ltm-affection" style="color:#5e7a3e;" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="relationship" data-npc="${npcAttr}">${esc(relationship ? '关系：' + relationship : '（点击填关系定位）')}</div>
@@ -1796,9 +2212,6 @@
 
     function renderSettingsView() {
         const s = getSettings();
-        const thresholdPills = [10, 20, 50].map((v) =>
-            `<button class="ltm-pill ${s.summaryThreshold === v ? 'ltm-active' : ''}" data-setting="summaryThreshold" data-value="${v}">${v} 层</button>`
-        ).join('');
 
         return `
         <div class="ltm-view ltm-active">
@@ -1819,8 +2232,8 @@
                 </div>
 
                 <label class="ltm-field-label">总结触发阈值（楼层数）</label>
-                <div class="ltm-pill-group">${thresholdPills}</div>
                 <input type="number" class="ltm-input" data-setting="summaryThreshold" value="${s.summaryThreshold}" min="5">
+                <p class="ltm-hint" style="margin-top:6px;"><i class="fa-solid fa-circle-info"></i> 建议填写 10-50</p>
 
                 <label class="ltm-field-label">保留最近活跃楼层数</label>
                 <input type="number" class="ltm-input" data-setting="keepActiveFloors" value="${s.keepActiveFloors}" min="1">
@@ -1839,6 +2252,29 @@
                     <i class="fa-solid fa-bolt"></i> 立即总结当前对话
                 </button>
                 <p class="ltm-hint" id="ltm-summarize-status" style="display:none;margin-top:10px;"></p>
+            </div>
+
+            <div class="ltm-card">
+                <div class="ltm-card-title"><span class="ltm-title-left"><i class="fa-solid fa-palette"></i> 主题换肤</span></div>
+                <p class="ltm-hint" style="margin-top:0;"><i class="fa-solid fa-circle-info"></i> 点击圆形色块切换面板主题色。</p>
+                ${Object.keys(THEMES).map((key) => {
+                    const t = THEMES[key];
+                    const active = (s.theme || 'default') === key ? 'ltm-active' : '';
+                    return `
+                    <div class="ltm-theme-row">
+                        <div class="ltm-theme-dot ${active}" data-act="set-theme" data-theme="${key}" title="${esc(t.name)}" style="background:linear-gradient(135deg,${t.accent},${t.bg});"></div>
+                        <span class="ltm-theme-name">${esc(t.name)}</span>
+                    </div>`;
+                }).join('')}
+            </div>
+
+            <div class="ltm-card">
+                <div class="ltm-card-title"><span class="ltm-title-left"><i class="fa-solid fa-database"></i> 记忆备份</span></div>
+                <p class="ltm-hint" style="margin-top:0;"><i class="fa-solid fa-circle-info"></i> 一键导出当前角色的完整记忆为 JSON，或将之前导出的 JSON 重新导入。分区归属正确、不乱码、不串台。</p>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button class="ltm-btn" data-act="export-memory" style="flex:1;"><i class="fa-solid fa-download"></i> 导出记忆</button>
+                    <button class="ltm-btn ltm-btn-ghost" data-act="import-memory" style="flex:1;"><i class="fa-solid fa-upload"></i> 导入记忆</button>
+                </div>
             </div>
 
             <div class="ltm-card">
@@ -1960,7 +2396,7 @@
                     } else if (part === 'todos') {
                         addToPartition(agentId, part, { content: '新的待办事项', done: false });
                     } else if (part === 'key_events') {
-                        addToPartition(agentId, part, { content: '新事件', keywords: [], emotions: [] });
+                        addToPartition(agentId, part, { date: '', content: '新事件', keywords: [], emotions: [] });
                     } else if (part === 'character_diary') {
                         addToPartition(agentId, part, { date: '', content: '新日记' });
                     } else if (part === 'emotion_flow') {
@@ -1991,6 +2427,19 @@
                 }
                 case 'fetch-models': {
                     handleFetchModels();
+                    break;
+                }
+                case 'set-theme': {
+                    applyTheme(btn.dataset.theme);
+                    renderCurrentView();
+                    break;
+                }
+                case 'export-memory': {
+                    exportMemory();
+                    break;
+                }
+                case 'import-memory': {
+                    triggerImport();
                     break;
                 }
             }
@@ -2123,7 +2572,15 @@
                 ? newText.split(/[,，、]/).map((s) => s.trim()).filter(Boolean)
                 : [];
             updatePartitionItem(agentId, part, idx, item, npcName);
-        } else if (field === 'date' || field === 'content' || field === 'affection' || field === 'relationship') {
+        } else if (field === 'date' || field === 'content') {
+            // 日期/内容字段：保留原对象结构（key_events / diary / emotion_flow 通用）
+            let item = arr[idx];
+            if (typeof item === 'string') {
+                item = { content: item, date: '', keywords: [], emotions: [], affection: '', relationship: '' };
+            }
+            item[field] = newText;
+            updatePartitionItem(agentId, part, idx, item, npcName);
+        } else if (field === 'affection' || field === 'relationship') {
             let item = arr[idx];
             if (typeof item === 'string') item = { content: item, date: '', affection: '', relationship: '' };
             item[field] = newText;
@@ -2249,7 +2706,7 @@
     function bindSettingsEvents() {
         $('#ltm_enabled').on('change', function () { setSetting('enabled', this.checked); });
         $('#ltm_inject').on('change', function () { setSetting('injectPrompt', this.checked); });
-        $('#ltm_threshold').on('input', function () { setSetting('summaryThreshold', parseInt(this.value) || 20); });
+        $('#ltm_threshold').on('input', function () { setSetting('summaryThreshold', parseInt(this.value) || 25); });
         $('#ltm_keep').on('input', function () { setSetting('keepActiveFloors', parseInt(this.value) || 5); });
         $('#ltm_todo').on('input', function () { setSetting('todoCheckInterval', parseInt(this.value) || 10); });
         $('#ltm_debug').on('change', function () { setSetting('debug', this.checked); });
@@ -2257,6 +2714,8 @@
 
     function init() {
         getSettings();
+        // 应用已保存的主题配色
+        applyTheme(getSettings().theme);
 
         const context = getSTContext();
         const eventSource = context?.eventSource;
@@ -2334,6 +2793,14 @@
         fetchExternalModels,
         hideFloorsExceptRecent,
         markFlowInjectionPending,
+        exportMemory,
+        importMemory,
+        triggerImport,
+        applyTheme,
+        getTheme,
+        THEMES,
+        collectMainCharacterNames,
+        isMainCharacter,
         refreshPanel: renderCurrentView,
     };
 })(typeof window !== 'undefined' ? window : globalThis);
