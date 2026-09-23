@@ -336,31 +336,41 @@ body.dark #ltm-panel-drawer,
     box-sizing: border-box;
     font-family: inherit;
     font-size: 0.85rem;
-    color: #3a2f2a;
-    background: rgba(255, 255, 255, 0.65);
-    border: 1px solid rgba(140, 28, 28, 0.25);
+    color: #1f1f1f;
+    background: #ffffff;
+    border: 1px solid #b8a78c;
     border-radius: 8px;
     padding: 9px 12px;
     resize: vertical;
     outline: none;
     transition: border-color 0.2s ease;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
+.ltm-input::placeholder,
+.ltm-textarea::placeholder {
+    color: #a39a8c;
+}
+
+/* 深色主题下同样保持独立高对比度配色，不继承酒馆皮肤 */
 .dark .ltm-input,
 .dark .ltm-textarea {
-    background: rgba(0, 0, 0, 0.25);
-    color: #e8e0d4;
-    border-color: rgba(201, 168, 106, 0.3);
+    background: #ffffff;
+    color: #1f1f1f;
+    border-color: #b8a78c;
 }
 
 .ltm-input:focus,
 .ltm-textarea:focus {
     border-color: #8c1c1c;
+    background: #fffefb;
+    box-shadow: 0 0 0 3px rgba(140, 28, 28, 0.12), inset 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 .dark .ltm-input:focus,
 .dark .ltm-textarea:focus {
-    border-color: #c9a86a;
+    border-color: #8c1c1c;
+    background: #fffefb;
 }
 
 /* ===== 按钮 ===== */
@@ -848,4 +858,25 @@ body.dark #ltm-panel-drawer,
     .ltm-card {
         padding: 11px;
     }
+}
+
+/* ===== 酒馆扩展页内联设置（.ltm-settings）输入框独立配色 =====
+   覆盖酒馆原生 .text_pole，保持高对比度，不随皮肤变化 */
+.ltm-settings .text_pole {
+    background: #ffffff;
+    color: #1f1f1f;
+    border: 1px solid #b8a78c;
+    border-radius: 6px;
+}
+
+.dark .ltm-settings .text_pole {
+    background: #ffffff;
+    color: #1f1f1f;
+    border-color: #b8a78c;
+}
+
+.ltm-settings .text_pole:focus {
+    border-color: #8c1c1c;
+    background: #fffefb;
+    box-shadow: 0 0 0 3px rgba(140, 28, 28, 0.12);
 }

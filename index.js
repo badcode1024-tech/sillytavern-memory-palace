@@ -66,6 +66,10 @@
         externalApiModel: '',
         // 分批次总结：每批最大楼层数
         batchSize: 25,
+        // 自定义总结范围（楼层区间）：留空表示总结全部未总结楼层。
+        // 例如 startFloor=26, endFloor=48 表示只总结第 26~48 层（含两端）。
+        summaryStartFloor: '',
+        summaryEndFloor: '',
         // 主题配色 key：'default' | 'theme2' | 'theme3'
         theme: 'default',
     };
@@ -261,7 +265,37 @@
         }
     }
 
+    // 获取当前聊天记录 ID（Chat File / Chat ID）。
+    // 优先用 getCurrentChatId()（新版 ST 提供），否则回退 context.chatId。
+    // 这是实现「换一个新聊天就切换独立记忆存档」的关键标识。
+    function getCurrentChatId() {
+        try {
+            const context = getSTContext();
+            if (!context) return null;
+            if (typeof context.getCurrentChatId === 'function') {
+                const id = context.getCurrentChatId();
+                if (id) return String(id);
+            }
+            if (context.chatId) return String(context.chatId);
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    // 记忆存储键：绑定「角色 + 当前聊天 ID」。
+    // - 拿到 chatId 时：`角色名::角色ID::聊天ID`（换新对话自动切独立存档）
+    // - 拿不到 chatId 时：回退为 `角色名::角色ID`（兼容旧版/异常情况）
     function getAgentId() {
+        const context = getSTContext();
+        if (!context) return null;
+        const char = context.characters?.[context.characterId];
+        if (!char) return null;
+        const base = `${char.name}::${context.characterId}`;
+        const chatId = getCurrentChatId();
+        return chatId ? `${base}::${chatId}` : base;
+    }
+
+    // 旧版（不含 chatId）的存储键，用于数据迁移
+    function getLegacyAgentId() {
         const context = getSTContext();
         if (!context) return null;
         const char = context.characters?.[context.characterId];
@@ -316,7 +350,20 @@
 
     function getCharacterMemory(agentId) {
         const db = getDatabase();
-        if (!db[agentId]) db[agentId] = createEmptyMemory();
+        if (!db[agentId]) {
+            // 迁移：新键（含 chatId）首次访问时，若旧键（不含 chatId）存在历史记忆，
+            // 把它「移动」到当前聊天存档（迁移后删除旧键），避免升级后记忆丢失。
+            // 删除旧键是关键：否则用户再开第二个新聊天时，旧键仍存在，会把旧记忆
+            // 再次复制到新聊天，造成记忆污染。
+            const legacyId = getLegacyAgentId();
+            if (legacyId && legacyId !== agentId && db[legacyId] && db[legacyId].meta) {
+                db[agentId] = db[legacyId];
+                delete db[legacyId];
+                saveSettings();
+            } else {
+                db[agentId] = createEmptyMemory();
+            }
+        }
         return db[agentId];
     }
 
@@ -1145,6 +1192,17 @@
         return true;
     }
 
+    // 强校验：模型返回文本为空（null/undefined/空串/纯空白）时，判定为总结失败。
+    // 防止被安全机制拦截导致返回空、却误报「总结成功」并写入空白记忆。
+    function assertNonEmptyOutput(out) {
+        if (out === null || out === undefined || String(out).trim() === '') {
+            const err = new Error('记忆总结失败：返回内容为空或被安全拦截');
+            err.ltmEmpty = true;
+            throw err;
+        }
+        return out;
+    }
+
     // 分批次总结：超过 batchSize 层的对话，拆成多批分别总结
     async function summarizeInBatches(agentId, floors, batchSize) {
         const results = [];
@@ -1164,14 +1222,14 @@
                 chunk: batchText,
             });
 
-            const out = await generateSmart(prompt.user, system);
+            const out = assertNonEmptyOutput(await generateSmart(prompt.user, system));
             const data = parseJsonFromText(out);
             if (data) {
                 applySummaryData(agentId, data);
                 results.push(data);
             } else {
-                // 该批次总结失败，记录但不中断整体
-                console.warn(`[LTM] 批次总结失败：${start}-${end} 层`);
+                // 该批次总结失败（非空但非 JSON），记录但不中断整体
+                console.warn(`[LTM] 批次总结失败（非 JSON）：${start}-${end} 层`);
             }
         }
         return results;
@@ -1202,9 +1260,15 @@
                 char: getCharName(),
                 chunk: allText,
             });
-            const out = await generateSmart(prompt.user, system);
+            const out = assertNonEmptyOutput(await generateSmart(prompt.user, system));
             const data = parseJsonFromText(out);
-            if (data) applySummaryData(agentId, data);
+            if (!data) {
+                // 返回非空但无法解析为 JSON：同样视为失败，禁止写入空白记忆
+                const err = new Error('记忆总结失败：返回内容无法解析为有效记忆');
+                err.ltmEmpty = true;
+                throw err;
+            }
+            applySummaryData(agentId, data);
             return data;
         }
     }
@@ -1247,6 +1311,47 @@
         saveSettings();
     }
 
+    // 从设置读取自定义总结范围，裁剪 chat 为对应楼层区间。
+    // 返回 { floors, startIdx, endIdx }；区间无效时返回 null 并提示。
+    function resolveSummaryRange(chat) {
+        const s = getSettings();
+        const total = chat.length;
+        const startRaw = String(s.summaryStartFloor ?? '').trim();
+        const endRaw = String(s.summaryEndFloor ?? '').trim();
+
+        // 未填写区间：总结全部楼层
+        if (!startRaw && !endRaw) {
+            return { floors: chat.map(toFloor), startIdx: 0, endIdx: total - 1 };
+        }
+
+        // 楼层号从 1 开始（用户视角），内部索引从 0 开始
+        const startFloor = startRaw ? parseInt(startRaw, 10) : 1;
+        const endFloor = endRaw ? parseInt(endRaw, 10) : total;
+
+        if (!Number.isFinite(startFloor) || !Number.isFinite(endFloor)) {
+            return { error: '楼层范围必须是数字' };
+        }
+        if (startFloor < 1) {
+            return { error: '起始楼层不能小于 1' };
+        }
+        if (endFloor > total) {
+            return { error: `结束楼层不能超过当前总楼层数（${total}）` };
+        }
+        if (startFloor > endFloor) {
+            return { error: '起始楼层不能大于结束楼层' };
+        }
+
+        const startIdx = startFloor - 1;
+        const endIdx = endFloor - 1;
+        const slice = chat.slice(startIdx, endIdx + 1);
+        return { floors: slice.map(toFloor), startIdx, endIdx };
+    }
+
+    // 楼层消息 → 统一结构
+    function toFloor(m) {
+        return { is_user: m.is_user, content: String(m.mes) };
+    }
+
     async function manualSummarizeAll(agentId) {
         const context = getSTContext();
         const chat = context?.chat || [];
@@ -1264,21 +1369,33 @@
             return;
         }
 
+        const range = resolveSummaryRange(chat);
+        if (range.error) {
+            setStatus(`<i class="fa-solid fa-triangle-exclamation"></i> 总结范围无效：${esc(range.error)}`, true);
+            toastr.warning('记忆宫殿：' + range.error);
+            return;
+        }
+
         setStatus('<i class="fa-solid fa-spinner fa-spin"></i> 正在总结，请稍候……');
 
         try {
-            const floors = chat.map((m) => ({
-                is_user: m.is_user,
-                content: String(m.mes),
-            }));
-            await doFullSummarize(agentId, floors);
-            getCharacterMemory(agentId).meta.lastSummarizedFloor = chat.length;
+            const { floors, startIdx, endIdx } = range;
+            const result = await doFullSummarize(agentId, floors);
+            // 区间总结时，若总结了到末尾楼层，则推进已总结指针
+            if (endIdx === chat.length - 1 && result) {
+                getCharacterMemory(agentId).meta.lastSummarizedFloor = chat.length;
+            }
             // 标记：下一轮注入情感流转一次（稳定关系级别）
             markFlowInjectionPending(agentId);
-            // 隐藏除最近 keepActiveFloors 层以外的全部楼层
-            await hideFloorsExceptRecent(agentId);
-            setStatus('<i class="fa-solid fa-circle-check"></i> 总结完成，记忆已更新，历史楼层已归档隐藏。');
-            toastr.success('记忆宫殿：总结完成，已写入记忆库并隐藏旧楼层');
+            // 仅当总结覆盖到末尾时归档隐藏旧楼层
+            if (endIdx === chat.length - 1) {
+                await hideFloorsExceptRecent(agentId);
+            }
+            const rangeText = (startIdx !== 0 || endIdx !== chat.length - 1)
+                ? `（第 ${startIdx + 1}~${endIdx + 1} 层）`
+                : '';
+            setStatus(`<i class="fa-solid fa-circle-check"></i> 总结完成${rangeText}，记忆已更新。`);
+            toastr.success(`记忆宫殿：总结完成${rangeText}，已写入记忆库`);
             renderCurrentView();
         } catch (err) {
             console.warn('[记忆宫殿] 一键总结失败：', err);
@@ -1495,6 +1612,65 @@
         return `\n\n[以下是你（${getCharName()}）的长期记忆，请自然融入你的回答，不要直接复述这些文字]\n${parts.join('\n')}`;
     }
 
+    // 检查是否该自动总结（基于楼层计数）。返回 true 表示已触发。
+    // 该函数是「到达阈值自动触发」的核心：实时读取当前聊天楼层数，
+    // 与上次已总结楼层比较，达到阈值即触发，无需手动。
+    function maybeAutoSummarize() {
+        const settings = getSettings();
+        if (!settings.enabled) return false;
+
+        const agentId = getAgentId();
+        if (!agentId) return false;
+
+        const context = getSTContext();
+        const chat = context?.chat || [];
+        if (!chat.length) return false;
+
+        const mem = getCharacterMemory(agentId);
+        const lastSummarized = mem.meta.lastSummarizedFloor || 0;
+
+        // 尚未总结的新楼层数（聊天总楼层 - 已总结到的楼层）
+        const newFloorCount = chat.length - lastSummarized;
+        const threshold = Math.max(1, parseInt(settings.summaryThreshold, 10) || 25);
+
+        if (newFloorCount < threshold) return false;
+
+        // 防止同一批楼层被重复触发（并发保护，模块级变量不持久化）
+        if (_autoSummarizing) return false;
+        _autoSummarizing = true;
+
+        const newFloors = chat.slice(lastSummarized).map((m) => ({
+            is_user: m.is_user,
+            content: String(m.mes),
+        }));
+
+        // 后台静默总结：不阻塞本轮回复
+        doFullSummarize(agentId, newFloors)
+            .then(async (result) => {
+                _autoSummarizing = false;
+                // 只有真正产出记忆才推进已总结楼层指针；否则保留，下次重试
+                if (result && (Array.isArray(result) ? result.length > 0 : true)) {
+                    mem.meta.lastSummarizedFloor = chat.length;
+                    markFlowInjectionPending(agentId);
+                    saveSettings();
+                    try {
+                        await hideFloorsExceptRecent(agentId);
+                    } catch (hideErr) {
+                        console.warn('[记忆宫殿] 隐藏楼层失败：', hideErr);
+                    }
+                    toastr.success('记忆宫殿：到达阈值，已自动完成总结并归档旧楼层');
+                } else {
+                    saveSettings();
+                }
+            })
+            .catch((err) => {
+                _autoSummarizing = false;
+                console.warn('[记忆宫殿] 自动总结失败：', err);
+                toastr.error('记忆宫殿：自动总结失败，' + (err?.message || '请检查模型'));
+            });
+        return true;
+    }
+
     // 核心入口：每次用户发消息时调用。只负责「判断是否该总结」+「检索注入」，
     // 不再每层提取。
     async function processUserMessage(userText) {
@@ -1504,40 +1680,8 @@
         const agentId = getAgentId();
         if (!agentId) return '';
 
-        const context = getSTContext();
-        const chat = context?.chat || [];
-        const mem = getCharacterMemory(agentId);
-        const lastSummarized = mem.meta.lastSummarizedFloor || 0;
-
-        // 尚未总结的新楼层数
-        const newFloorCount = chat.length - lastSummarized;
-
-        // 达到阈值才触发总结（后台静默，不阻塞）
-        if (newFloorCount >= settings.summaryThreshold) {
-            const newFloors = chat.slice(lastSummarized).map((m) => ({
-                is_user: m.is_user,
-                content: String(m.mes),
-            }));
-            // 后台静默总结：不 await，避免阻塞本轮回复
-            doFullSummarize(agentId, newFloors)
-                .then(async () => {
-                    mem.meta.lastSummarizedFloor = chat.length;
-                    // 标记：下一轮注入情感流转一次
-                    markFlowInjectionPending(agentId);
-                    saveSettings();
-                    // 隐藏除最近 keepActiveFloors 层以外的全部楼层
-                    try {
-                        await hideFloorsExceptRecent(agentId);
-                    } catch (hideErr) {
-                        console.warn('[记忆宫殿] 隐藏楼层失败：', hideErr);
-                    }
-                    toastr.success('记忆宫殿：后台总结完成，旧楼层已归档');
-                })
-                .catch((err) => {
-                    console.warn('[记忆宫殿] 后台总结失败：', err);
-                    toastr.error('记忆宫殿：后台总结失败，' + (err?.message || '请检查模型'));
-                });
-        }
+        // 自动总结检测（到达阈值自动触发）
+        maybeAutoSummarize();
 
         // 检索命中并注入（仅命中关键词/情绪的关键事件）
         return buildInjectionPrompt(agentId, userText);
@@ -1575,6 +1719,8 @@
     let currentNpc = null;
     let currentPart = 'key_events';
     let currentView = 'memory';
+    // 自动总结并发保护标志（模块级，非持久化，避免刷新/崩溃后残留卡死）
+    let _autoSummarizing = false;
 
     function ensureFontAwesome() {
         if (document.getElementById('ltm-fa-css')) return;
@@ -1639,7 +1785,11 @@
 .ltm-card-title i{color:var(--ltm-gold);}
 .ltm-title-left{display:inline-flex;align-items:center;gap:8px;}
 .ltm-field-label{display:block;font-size:.8rem;font-weight:600;margin:12px 0 6px;color:var(--ltm-accent-dark);}
-.ltm-input,.ltm-textarea{width:100%;box-sizing:border-box;font-size:.85rem;color:var(--ltm-text);background:rgba(255,255,255,.65);border:1px solid rgba(140,28,28,.25);border-radius:8px;padding:9px 12px;resize:vertical;outline:none;}
+/* 输入框独立配色：写死高对比度，不继承酒馆全局皮肤，避免不同主题下看不清 */
+.ltm-input,.ltm-textarea{width:100%;box-sizing:border-box;font-size:.85rem;color:#1f1f1f;background:#ffffff;border:1px solid #b8a78c;border-radius:8px;padding:9px 12px;resize:vertical;outline:none;box-shadow:inset 0 1px 2px rgba(0,0,0,.04);}
+.ltm-input::placeholder,.ltm-textarea::placeholder{color:#a39a8c;}
+.ltm-input:focus,.ltm-textarea:focus{border-color:var(--ltm-accent);background:#fffefb;box-shadow:0 0 0 3px rgba(140,28,28,.12),inset 0 1px 2px rgba(0,0,0,.04);}
+.ltm-input[type="password"],.ltm-input[type="number"],.ltm-input[type="text"]{background:#ffffff;color:#1f1f1f;}
 .ltm-btn{font-weight:600;background:var(--ltm-accent);color:var(--ltm-bg);border:1px solid var(--ltm-accent-dark);border-radius:8px;padding:7px 16px;cursor:pointer;font-size:.82rem;white-space:nowrap;}
 .ltm-btn-ghost{background:transparent;color:var(--ltm-accent-dark);border:1px solid rgba(140,28,28,.35);}
 .ltm-btn-danger{background:transparent;color:var(--ltm-accent-deep);border:1px solid rgba(178,58,42,.4);}
@@ -1684,12 +1834,40 @@
 .ltm-model-row{display:flex;gap:8px;align-items:center;}
 .ltm-model-row .ltm-input{flex:1;min-width:0;}
 .ltm-model-row .ltm-btn{flex-shrink:0;}
+.ltm-range-row{display:flex;gap:8px;align-items:center;}
+.ltm-range-row .ltm-input{flex:1;min-width:0;}
+.ltm-range-sep{flex-shrink:0;color:var(--ltm-accent-dark);font-weight:700;}
 .ltm-theme-row{display:flex;gap:14px;align-items:center;padding:6px 0;}
 .ltm-theme-dot{width:38px;height:38px;border-radius:50%;cursor:pointer;border:3px solid transparent;box-shadow:0 0 0 1px rgba(0,0,0,.15);transition:transform .15s ease,border-color .15s ease;flex-shrink:0;}
 .ltm-theme-dot:hover{transform:scale(1.1);}
 .ltm-theme-dot.ltm-active{border-color:var(--ltm-accent-dark);box-shadow:0 0 0 2px var(--ltm-accent),0 0 0 1px rgba(0,0,0,.15);}
 .ltm-theme-name{font-size:.8rem;color:var(--ltm-text);}
-@media(max-width:640px){#ltm-panel-drawer{width:100vw;max-width:100vw;height:100vh;height:100dvh;max-height:100vh;max-height:100dvh;}.ltm-grid{grid-template-columns:1fr 1fr;}.ltm-nav-tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;}.ltm-drawer-body{padding-bottom:calc(80px + env(safe-area-inset-bottom,0px));}}
+/* ===== 响应式断点 ===== */
+/* 平板（768px ~ 1024px）：抽屉宽度收敛，主面板/网格布局不溢出、不重叠 */
+@media(min-width:768px) and (max-width:1024px){
+    #ltm-panel-drawer{width:min(520px,72vw);max-width:88vw;}
+    .ltm-drawer-body{padding:18px 20px 80px;}
+    .ltm-grid{grid-template-columns:repeat(3,1fr);}
+    .ltm-nav-tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;}
+    .ltm-char-card,.ltm-item-card{min-height:80px;}
+    .ltm-drawer-head{padding:16px 20px;}
+}
+/* 手机（≤640px）：全屏抽屉 + 刘海屏/全面屏安全距离 */
+@media(max-width:640px){
+    #ltm-panel-drawer{width:100vw;max-width:100vw;height:100vh;height:100dvh;max-height:100vh;max-height:100dvh;}
+    .ltm-grid{grid-template-columns:1fr 1fr;}
+    .ltm-nav-tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;}
+    .ltm-drawer-body{padding-bottom:calc(80px + env(safe-area-inset-bottom,0px));}
+    /* 刘海屏/全面屏：标题栏与关闭按钮下移避开状态栏，并加大点击区域 */
+    .ltm-drawer-head{
+        padding-top:calc(14px + env(safe-area-inset-top,0px));
+        padding-left:calc(18px + env(safe-area-inset-left,0px));
+        padding-right:calc(18px + env(safe-area-inset-right,0px));
+        min-height:calc(52px + env(safe-area-inset-top,0px));
+    }
+    .ltm-drawer-close{width:40px;height:40px;font-size:1.15rem;flex-shrink:0;}
+    .ltm-nav-tabs{padding-left:calc(16px + env(safe-area-inset-left,0px));padding-right:calc(16px + env(safe-area-inset-right,0px));}
+}
         `;
         document.head.appendChild(style);
     }
@@ -1709,7 +1887,7 @@
         <div id="ltm-panel-overlay"></div>
         <aside id="ltm-panel-drawer" style="background-color:#f6f1e6;background-image:linear-gradient(160deg,#f6f1e6,#efe6d3);">
             <div class="ltm-drawer-head">
-                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v2.3.0</span></div>
+                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v2.4.0</span></div>
                 <button class="ltm-drawer-close" id="ltm-panel-close"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="ltm-nav-tabs" id="ltm-nav-tabs">
@@ -2294,9 +2472,16 @@
 
             <div class="ltm-card">
                 <div class="ltm-card-title"><span class="ltm-title-left"><i class="fa-solid fa-wand-magic-sparkles"></i> 一键总结</span></div>
-                <p class="ltm-hint"><i class="fa-solid fa-circle-info"></i> 立即总结当前角色的全部对话，提炼关键事件（含关键词/情绪）、日记、情感流转等，并写入记忆库。超过 50 层会自动分批次总结。</p>
+                <p class="ltm-hint"><i class="fa-solid fa-circle-info"></i> 立即总结当前角色的对话，提炼关键事件（含关键词/情绪）、日记、情感流转等，并写入记忆库。超过 50 层会自动分批次总结。</p>
+                <label class="ltm-field-label">自定义总结范围（楼层区间，可选）</label>
+                <div class="ltm-range-row">
+                    <input type="number" class="ltm-input" data-setting="summaryStartFloor" value="${esc(String(s.summaryStartFloor ?? ''))}" min="1" placeholder="起始楼层，如 26">
+                    <span class="ltm-range-sep">~</span>
+                    <input type="number" class="ltm-input" data-setting="summaryEndFloor" value="${esc(String(s.summaryEndFloor ?? ''))}" min="1" placeholder="结束楼层，如 48">
+                </div>
+                <p class="ltm-hint" style="margin-top:6px;"><i class="fa-solid fa-circle-info"></i> 留空则总结全部楼层；填写区间（如 26~48）则只总结对应楼层。当前共 ${esc(String((getSTContext()?.chat || []).length))} 层。</p>
                 <button class="ltm-btn" data-act="summarize-now" style="width:100%;padding:12px;">
-                    <i class="fa-solid fa-bolt"></i> 立即总结当前对话
+                    <i class="fa-solid fa-bolt"></i> 立即总结
                 </button>
                 <p class="ltm-hint" id="ltm-summarize-status" style="display:none;margin-top:10px;"></p>
             </div>
@@ -2381,7 +2566,19 @@
 
         body.addEventListener('click', handleClick);
         body.addEventListener('change', handleChange);
+        // 实时保存文本类设置（API 地址/Key/模型名），避免「改完未失焦」导致旧值仍被调用
+        body.addEventListener('input', handleInput);
         body.addEventListener('focusout', handleBlur);
+    }
+
+    // 输入即保存：对 text/password 类型的设置项，实时写回 settings，杜绝缓存/未生效问题
+    function handleInput(e) {
+        const el = e.target;
+        if (!el.matches('[data-setting]')) return;
+        const key = el.dataset.setting;
+        if (el.type === 'password' || el.type === 'text') {
+            setSetting(key, el.value);
+        }
     }
 
     function handleClick(e) {
@@ -2400,11 +2597,12 @@
             switch (act) {
                 case 'del':
                     removePartitionItem(agentId, part, idx, npcName);
-                    renderCurrentView();
+                    // 只局部刷新当前分区内容，保持停留在当前编辑界面，不跳回主界面
+                    renderPartContentOnly();
                     break;
                 case 'todo-done':
                     markTodoDone(agentId, idx, npcName);
-                    renderCurrentView();
+                    renderPartContentOnly();
                     break;
                 case 'clear-all':
                     if (confirm(`确定清空「${getCharName()}」的全部记忆吗？此操作不可恢复。`)) {
@@ -2451,7 +2649,8 @@
                     } else {
                         addToPartition(agentId, part, '新条目');
                     }
-                    renderCurrentView();
+                    // 只局部刷新当前分区内容，保持停留在当前编辑界面，绝不跳转
+                    renderPartContentOnly();
                     break;
                 }
                 case 'reset-prompt': {
@@ -2537,6 +2736,9 @@
             } else if (el.type === 'password' || el.type === 'text') {
                 // 文本类设置（API 地址/Key/模型名）
                 setSetting(key, el.value);
+            } else if (key === 'summaryStartFloor' || key === 'summaryEndFloor') {
+                // 自定义总结区间：保留字符串，允许留空（留空 = 总结全部楼层）
+                setSetting(key, el.value.trim());
             } else if (el.dataset.value !== undefined) {
                 setSetting(key, parseInt(el.dataset.value, 10) || 0);
             } else {
@@ -2785,10 +2987,23 @@
             eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, injectPrompt);
         }
         if (eventSource && event_types?.CHAT_CHANGED) {
-            eventSource.on(event_types.CHAT_CHANGED, renderCurrentView);
+            // 切换聊天（含新对话/分支）时：重置编辑状态并刷新面板。
+            // 记忆存储键已绑定 chatId，切换后自动指向独立存档。
+            eventSource.on(event_types.CHAT_CHANGED, () => {
+                currentNpc = null;
+                currentPart = 'key_events';
+                pendingInjection = '';
+                renderCurrentView();
+            });
+        }
+        // 新消息落库后（AI 回复完成）再次检查自动总结阈值，更可靠地触发
+        if (eventSource && event_types?.MESSAGE_RECEIVED) {
+            eventSource.on(event_types.MESSAGE_RECEIVED, () => {
+                maybeAutoSummarize();
+            });
         }
 
-        console.log('[记忆宫殿] 插件已加载（纯前端方案，服务端持久化）');
+        console.log('[记忆宫殿] 插件已加载（纯前端方案，服务端持久化，按聊天 ID 隔离存档）');
     }
 
     // ---------------------------------------------------------------------
