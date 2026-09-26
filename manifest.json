@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "badcode1024-tech",
-    "version": "2.3.0",
+    "version": "2.5.0",
     "homePage": "https://github.com/badcode1024-tech/sillytavern-long-term-memory",
     "auto_update": true,
     "license": "MIT"

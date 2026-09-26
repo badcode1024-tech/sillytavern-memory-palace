@@ -13,72 +13,8 @@
     --ltm-ink: #3a2f2a;
 }
 
-/* 悬浮球容器（fixed 定位，可拖拽） */
-#ltm-fab {
-    position: fixed;
-    right: 0;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: 30000;
-    width: 52px;
-    height: 52px;
-    cursor: grab;
-    user-select: none;
-    -webkit-user-select: none;
-    transition: transform 0.2s ease, right 0.25s ease;
-    touch-action: none;
-}
-
-/* 悬浮球本体 */
-#ltm-fab .ltm-fab-ball {
-    width: 100%;
-    height: 100%;
-    border-radius: 14px;
-    background: linear-gradient(135deg, #8c1c1c, #5e1010);
-    border: 1px solid rgba(201, 168, 106, 0.6);
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #f6f1e6;
-    font-size: 22px;
-    transition: all 0.25s ease;
-    position: relative;
-}
-
-#ltm-fab .ltm-fab-ball:hover {
-    box-shadow: 0 4px 18px rgba(140, 28, 28, 0.5);
-}
-
-#ltm-fab .ltm-fab-label {
-    position: absolute;
-    right: 56px;
-    top: 50%;
-    transform: translateY(-50%);
-    white-space: nowrap;
-    background: rgba(94, 16, 16, 0.9);
-    color: #f6f1e6;
-    font-size: 12px;
-    padding: 4px 10px;
-    border-radius: 8px;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.2s ease;
-}
-
-#ltm-fab:hover .ltm-fab-label {
-    opacity: 1;
-}
-
-/* 静止收起：只露出约 1/4 */
-#ltm-fab.ltm-fab-collapsed {
-    right: -39px;
-}
-
-#ltm-fab.ltm-fab-collapsed:hover,
-#ltm-fab.ltm-fab-collapsed.ltm-fab-dragging {
-    right: 0;
-}
+/* 悬浮球（#ltm-fab）的全部样式由 index.js 内联注入（ensurePanelStyles），此处不再重复定义，
+   避免两套样式因加载顺序/优先级互相覆盖（含小羊贴图外观与缩进态）。 */
 
 /* 面板抽屉（从右侧滑出的档案面板） */
 #ltm-panel-overlay {
