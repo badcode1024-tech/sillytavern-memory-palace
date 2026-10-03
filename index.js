@@ -629,6 +629,69 @@
         return false;
     }
 
+    // NPC 打包升级为主要角色：把该 NPC 的全部分区数据合并进主角色记忆库，
+    // 然后删除原 NPC 档。之后该角色会像主要角色一样被全量注入上下文、参与互动。
+    function promoteNpcToMain(agentId, npcName) {
+        const mem = getCharacterMemory(agentId);
+        const npcMem = mem.npcs?.[npcName];
+        if (!npcMem) return false;
+
+        // 迁移的分区：数组类分区直接 concat，并做去重
+        const ARRAY_PARTS = [
+            'key_events', 'character_diary', 'emotion_flow', 'todos',
+            'important_items', 'special_occasions', 'emotional_tags',
+        ];
+
+        for (const part of ARRAY_PARTS) {
+            const src = npcMem[part];
+            if (!Array.isArray(src) || !src.length) continue;
+            if (!Array.isArray(mem[part])) mem[part] = [];
+
+            for (const item of src) {
+                // 去重：与主角色已有条目比较（对象按 content 归一化，字符串按原值）
+                const dup = mem[part].some((exist) => {
+                    if (typeof item === 'string' || typeof exist === 'string') {
+                        return normalizeStr(itemTextRaw(item)) === normalizeStr(itemTextRaw(exist));
+                    }
+                    const aContent = normalizeStr(item?.content);
+                    const aDate = normalizeStr(item?.date);
+                    const bContent = normalizeStr(exist?.content);
+                    const bDate = normalizeStr(exist?.date);
+                    // key_events / diary / emotion_flow 用 content+date；其他对象按 content
+                    return aContent === bContent && (aDate === bDate || !aDate || !bDate);
+                });
+                if (!dup) mem[part].push(item);
+            }
+        }
+
+        // 迁移情感流转之外，把 NPC 的 meta（身份）作为一条关键事件补充进主角
+        const identity = npcMem?.meta?.identity || '';
+        if (identity) {
+            const ev = {
+                date: '',
+                content: `${npcName} 的身份：${identity}`,
+                keywords: [npcName],
+                emotions: [],
+            };
+            const dup = (mem.key_events || []).some((e) =>
+                normalizeStr(e?.content) === normalizeStr(ev.content));
+            if (!dup) {
+                if (!Array.isArray(mem.key_events)) mem.key_events = [];
+                mem.key_events.push(ev);
+            }
+        }
+
+        // 删除原 NPC 档
+        delete mem.npcs[npcName];
+        mem.meta.updated_at = Date.now();
+        saveSettings();
+        return true;
+    }
+
+    function itemTextRaw(it) {
+        return typeof it === 'string' ? it : (it?.content ?? it?.name ?? '');
+    }
+
     function getNpcMemory(agentId, npcName) {
         const mem = getCharacterMemory(agentId);
         return mem.npcs?.[npcName] || null;
@@ -1566,14 +1629,83 @@
         const parts = [];
         const text = String(userText || '');
 
-        const push = (label, arr, formatter) => {
-            if (arr && arr.length) {
-                const body = formatter ? arr.map(formatter).join('；') : arr.join('；');
-                parts.push(`${label}：${body}`);
-            }
+        const push = (label, body) => {
+            if (body && String(body).trim()) parts.push(`${label}：${body}`);
         };
+        const itemText = (it) => (typeof it === 'string' ? it : (it?.content ?? it?.name ?? ''));
 
-        // 关键事件：只发送检索命中的事件（核心）
+        // ============ 一、全量记忆概览（始终注入，确保 AI 每次都能读到记忆） ============
+        // 关键事件：取最近 N 条（避免上下文过长），始终让 AI 掌握角色经历
+        const events = mem.key_events || [];
+        if (events.length) {
+            const recentEvents = events.slice(-8);
+            const eventText = recentEvents.map((ev) => {
+                if (typeof ev === 'string') return ev;
+                const kw = (ev.keywords || []).join('/');
+                const em = (ev.emotions || []).join('/');
+                const dt = ev.date ? `[${ev.date}]` : '';
+                const tag = [dt, kw, em].filter(Boolean).join(' · ');
+                return tag ? `${ev.content}（${tag}）` : ev.content;
+            }).filter(Boolean).join('；');
+            push('关键事件（最近）', eventText);
+        }
+
+        // 待办/约定（未完成）
+        const pendingTodos = (mem.todos || []).filter((t) => !(t && t.done));
+        if (pendingTodos.length) {
+            push('待办/约定', pendingTodos.map(itemText).filter(Boolean).join('；'));
+        }
+
+        // 重要物品
+        const items = mem.important_items || [];
+        if (items.length) {
+            const itemText2 = items.map((it) => {
+                if (typeof it === 'string') return it;
+                return it.significance ? `${it.name}（${it.significance}）` : it.name;
+            }).filter(Boolean).join('；');
+            push('重要物品', itemText2);
+        }
+
+        // 情绪标签（当前角色的情绪基调）
+        const tags = mem.emotional_tags || [];
+        if (tags.length) {
+            push('情绪标签', tags.filter(Boolean).join('、'));
+        }
+
+        // 情感流转：最近一条（始终注入，稳定关系级别）
+        const flows = mem.emotion_flow || [];
+        if (flows.length) {
+            const latest = flows[flows.length - 1];
+            if (typeof latest === 'object') {
+                const flowParts = [];
+                if (latest.date) flowParts.push(`阶段：${latest.date}`);
+                if (latest.content) flowParts.push(latest.content);
+                if (latest.affection) flowParts.push(`好感度：${latest.affection}`);
+                if (latest.relationship) flowParts.push(`关系定位：${latest.relationship}`);
+                if (flowParts.length) {
+                    push('当前情感状态', flowParts.join('；'));
+                }
+            }
+        }
+
+        // 特殊节日/纪念日
+        const occasions = mem.special_occasions || [];
+        if (occasions.length) {
+            push('特殊节日/纪念日', occasions.filter(Boolean).join('、'));
+        }
+
+        // NPC 名录：始终附上 NPC 名字-身份清单，让 AI 知道有哪些相关人物
+        const npcNames = Object.keys(mem.npcs || {});
+        if (npcNames.length) {
+            const npcList = npcNames.map((n) => {
+                const idn = mem.npcs[n]?.meta?.identity || '';
+                return idn ? `${n}（${idn}）` : n;
+            }).join('、');
+            push('相关 NPC', npcList);
+        }
+
+        // ============ 二、检索式召回（命中关键词/情绪/日期时补充细节） ============
+        // 关键事件：命中关键词/情绪的事件（补充细节）
         const relevant = retrieveRelevantEvents(agentId, userText);
         if (relevant.length) {
             const eventText = relevant.map((ev) => {
@@ -1583,68 +1715,45 @@
                 const tag = [dt, kw, em].filter(Boolean).join(' · ');
                 return tag ? `${ev.content}（${tag}）` : ev.content;
             }).join('；');
-            parts.push(`相关记忆事件：${eventText}`);
+            push('相关记忆事件', eventText);
         }
 
-        // 日记：仅命中日期关键词时发送（纪念日用途）
+        // 日记：命中日期关键词时补充（纪念日用途）
         const relevantDiary = retrieveRelevantDiary(agentId, userText);
         if (relevantDiary.length) {
             const diaryText = relevantDiary
                 .map((d) => (d.date ? `[${d.date}] ${d.content}` : d.content))
                 .join('；');
-            parts.push(`纪念日记忆：${diaryText}`);
+            push('纪念日记忆', diaryText);
         }
 
-        // 待办/约定（未完成，轻量）
-        const pendingTodos = (mem.todos || []).filter((t) => !(t && t.done));
-        push('待办/约定', pendingTodos.map((t) => (typeof t === 'string' ? t : t.content)));
-
-        // 情感流转：只在「刚完成大总结」的那一轮发送一次，用于稳定关系级别
-        const shouldInjectFlow = mem.meta && mem.meta.pendingFlowInjection === true;
-        if (shouldInjectFlow) {
-            const flows = mem.emotion_flow || [];
-            if (flows.length) {
-                const latest = flows[flows.length - 1];
-                if (typeof latest === 'object') {
-                    const flowParts = [];
-                    if (latest.date) flowParts.push(`阶段：${latest.date}`);
-                    if (latest.content) flowParts.push(latest.content);
-                    if (latest.affection) flowParts.push(`好感度：${latest.affection}`);
-                    if (latest.relationship) flowParts.push(`关系定位：${latest.relationship}`);
-                    if (flowParts.length) {
-                        parts.push(`当前情感状态（稳定关系）：${flowParts.join('；')}`);
-                    }
-                }
-            }
-            // 只注入这一次，之后清除标记
-            mem.meta.pendingFlowInjection = false;
-            saveSettings();
-        }
-
-        // NPC：必须命中 NPC 名字或身份关键词，才发送该 NPC 的简略记忆
-        for (const npcName in mem.npcs) {
+        // NPC：命中 NPC 名字或身份关键词时，补充该 NPC 的简略记忆
+        for (const npcName of npcNames) {
             const npcMem = mem.npcs[npcName];
             const identity = npcMem?.meta?.identity || '';
-            // 名字「张三-掌柜」拆出名字与身份，都作为触发关键词
             const nameTokens = npcName.split(/[-—–_·\s]/).filter(Boolean);
             const triggerTokens = [...nameTokens, identity].filter(Boolean);
-
             const hit = triggerTokens.some((t) => t && text.includes(t));
             if (!hit) continue;
 
             const npcKeyEvents = npcMem.key_events || [];
             if (npcKeyEvents.length) {
-                // NPC 记忆尽量简略，只取最近一条关键事件
                 const brief = npcKeyEvents
                     .map((e) => (typeof e === 'object' ? e.content : e))
                     .filter(Boolean)
-                    .slice(-1)
+                    .slice(-3)
                     .join('；');
                 if (brief) {
                     const label = identity ? `${npcName}（${identity}）` : npcName;
-                    parts.push(`【${label}】记忆：${brief}`);
+                    push(`【${label}】记忆`, brief);
                 }
             }
+        }
+
+        // ============ 三、清理一次性标记 ============
+        if (mem.meta && mem.meta.pendingFlowInjection === true) {
+            mem.meta.pendingFlowInjection = false;
+            saveSettings();
         }
 
         if (!parts.length) return '';
@@ -1930,7 +2039,7 @@
         <div id="ltm-panel-overlay"></div>
         <aside id="ltm-panel-drawer" style="background-color:#f6f1e6;background-image:linear-gradient(160deg,#f6f1e6,#efe6d3);">
             <div class="ltm-drawer-head">
-                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v2.5.0</span></div>
+                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v2.6.0</span></div>
                 <button class="ltm-drawer-close" id="ltm-panel-close"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="ltm-nav-tabs" id="ltm-nav-tabs">
@@ -2374,6 +2483,7 @@
                 <div class="ltm-char-card" data-npc="${esc(n)}">
                     <div class="ltm-char-icon"><i class="fa-solid fa-user-secret"></i></div>
                     <div class="ltm-char-name">${esc(label)}</div>
+                    <button class="ltm-card-delete" data-act="promote-npc" data-npc="${esc(n)}" title="升级为主要角色（打包移动到主角记忆库）"><i class="fa-solid fa-arrow-up"></i></button>
                     <button class="ltm-card-delete" data-act="del-npc" data-npc="${esc(n)}" title="删除建档"><i class="fa-solid fa-trash"></i></button>
                 </div>`;
             }).join('')
@@ -2587,6 +2697,9 @@
         <div class="ltm-card">
             <div class="ltm-card-title">
                 <span class="ltm-title-left"><i class="fa-solid fa-id-card"></i> 「${esc(npcName)}」独立档案</span>
+                <button class="ltm-btn ltm-btn-sm" data-act="promote-npc" data-npc="${esc(npcName)}" title="打包移动到主要角色记忆库，之后像主角一样互动">
+                    <i class="fa-solid fa-arrow-up"></i> 升级为主角
+                </button>
             </div>
             ${renderPartitionTabs()}
             <div id="ltm-part-content"></div>
@@ -2664,6 +2777,22 @@
                         renderCurrentView();
                     }
                     break;
+                case 'promote-npc': {
+                    // NPC 打包升级为主要角色：合并进主角记忆库并删除原 NPC 档
+                    if (confirm(`确定把 NPC「${npc}」的全部记忆打包移动到主要角色「${getCharName()}」的记忆库吗？\n\n移动后该 NPC 将从 NPC 列表移除，其关键事件、待办、物品、日记、情感流转等会并入主角，之后会像主要角色一样参与互动。`)) {
+                        const ok = promoteNpcToMain(agentId, npc);
+                        if (ok) {
+                            toastr?.success?.(`记忆宫殿：已把「${npc}」升级为主要角色`);
+                            console.log(`[记忆宫殿] 已将 NPC「${npc}」打包移动为主角记忆`);
+                        } else {
+                            toastr?.error?.(`记忆宫殿：未找到 NPC「${npc}」`);
+                        }
+                        currentNpc = null;
+                        currentPart = 'key_events';
+                        renderCurrentView();
+                    }
+                    break;
+                }
                 case 'add-npc': {
                     const name = prompt('请输入 NPC 名字与身份，格式「名字-身份」，例如「张三-客栈掌柜」：');
                     if (name && name.trim()) {
@@ -2928,16 +3057,28 @@
         const settings = getSettings();
         if (!settings.enabled) return;
         const agentId = getAgentId();
-        if (!agentId) return;
+        if (!agentId) {
+            console.warn('[记忆宫殿] 注入跳过：未识别当前角色（agentId 为空）');
+            return;
+        }
 
         const context = getSTContext();
         const chat = context?.chat || [];
         const lastUser = [...chat].reverse().find((m) => m.is_user);
-        if (!lastUser) return;
+        if (!lastUser) {
+            console.warn('[记忆宫殿] 注入跳过：未找到最近一条用户消息');
+            return;
+        }
 
         try {
             pendingInjection = await processUserMessage(String(lastUser.mes));
-            log('注入提示词已就绪，长度：', pendingInjection.length);
+            // 调试日志：每次发消息都打印，确认记忆是否成功组装
+            if (pendingInjection) {
+                console.log('[记忆宫殿] ✅ 记忆已组装，长度 ' + pendingInjection.length + ' 字符，待注入上下文：');
+                console.log('[记忆宫殿] ' + pendingInjection);
+            } else {
+                console.log('[记忆宫殿] ⚠️ 本轮未组装到任何记忆（可能记忆库为空，或当前消息未命中任何条目）。角色：' + getCharName());
+            }
         } catch (err) {
             console.warn('[LTM] 记忆处理失败：', err);
             pendingInjection = '';
@@ -2946,21 +3087,34 @@
 
     function injectPrompt(eventData) {
         const settings = getSettings();
-        if (!settings.enabled || !settings.injectPrompt) return;
-        if (!pendingInjection) return;
+        if (!settings.enabled) return;
+        if (!settings.injectPrompt) {
+            console.log('[记忆宫殿] 注入开关已关闭（injectPrompt=false），跳过注入');
+            return;
+        }
+        if (!pendingInjection) {
+            console.log('[记忆宫殿] 无待注入记忆（pendingInjection 为空），跳过');
+            return;
+        }
 
         const injection = pendingInjection;
         pendingInjection = '';
 
         const chat = eventData?.chat;
-        if (!Array.isArray(chat)) return;
+        if (!Array.isArray(chat)) {
+            console.warn('[记忆宫殿] ❌ 注入失败：CHAT_COMPLETION_PROMPT_READY 事件的 chat 不是数组');
+            return;
+        }
 
+        // 就地 push 一条 system 消息，SillyTavern 随后会把该数组序列化发给大模型
         chat.push({
             role: 'system',
             content: injection,
             is_system: true,
             force_avatar: false,
         });
+        console.log('[记忆宫殿] ✅ 记忆已注入到发送给大模型的上下文（chat 数组长度 ' + chat.length + '）。注入内容：');
+        console.log('[记忆宫殿] ' + injection);
     }
 
     function buildSettingsHtml() {
@@ -3089,6 +3243,7 @@
         ensureNpcMemory,
         listNpcs,
         removeNpc,
+        promoteNpcToMain,
         getNpcMemory,
         getAllPrompts,
         savePrompt,
