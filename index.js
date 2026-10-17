@@ -111,6 +111,18 @@
             aux: '#6d9dce',
             text: '#3a2f2a',
         },
+        dark: {
+            name: '夜间模式（深色）',
+            dark: true,           // 标记为深色主题，触发 data-theme-dark 覆盖
+            accent: '#9b5cff',     // 夜间用紫色点缀
+            accentDark: '#2a1a3e',
+            accentDeep: '#b47aff',
+            gold: '#c9a86a',
+            bg: '#1e1e26',         // 深色底
+            bg2: '#272733',
+            aux: '#8a8a9a',
+            text: '#e8e6f0',
+        },
     };
 
     // ---------------------------------------------------------------------
@@ -339,6 +351,7 @@
             todos: [],              // 待办：[{content, done}]
             important_items: [],    // 重要物品：[{name, significance}]
             npcs: {},
+            promoted: {},           // 升级的主要角色独立档案：{ 名字: createEmptyMemory() }
             meta: {
                 created_at: Date.now(),
                 updated_at: Date.now(),
@@ -369,18 +382,23 @@
         return db[agentId];
     }
 
-    function getPartition(agentId, partition, npcName = null) {
-        const mem = npcName
-            ? getCharacterMemory(agentId).npcs[npcName]
-            : getCharacterMemory(agentId);
+    // 统一解析「子档案」记忆对象：优先升级主要角色（promoted），其次 NPC，最后主角色。
+    // 返回目标 memory 对象（可能为 null）。
+    function resolveSubMemory(agentId, npcName = null, promotedName = null) {
+        const mem = getCharacterMemory(agentId);
+        if (promotedName) return mem.promoted?.[promotedName] || null;
+        if (npcName) return mem.npcs?.[npcName] || null;
+        return mem;
+    }
+
+    function getPartition(agentId, partition, npcName = null, promotedName = null) {
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         if (!mem) return [];
         return mem[partition] || [];
     }
 
-    function addToPartition(agentId, partition, item, npcName = null) {
-        const mem = npcName
-            ? getCharacterMemory(agentId).npcs[npcName]
-            : getCharacterMemory(agentId);
+    function addToPartition(agentId, partition, item, npcName = null, promotedName = null) {
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         if (!mem) return;
         if (!Array.isArray(mem[partition])) mem[partition] = [];
         if (Array.isArray(item)) {
@@ -398,10 +416,8 @@
     }
 
     // 重要物品去重：按 name 归一化后比较，已存在则合并/跳过
-    function mergeImportantItems(agentId, items, npcName = null) {
-        const mem = npcName
-            ? getCharacterMemory(agentId).npcs[npcName]
-            : getCharacterMemory(agentId);
+    function mergeImportantItems(agentId, items, npcName = null, promotedName = null) {
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         if (!mem) return;
         if (!Array.isArray(mem.important_items)) mem.important_items = [];
 
@@ -433,10 +449,8 @@
     }
 
     // 待办去重 + 完成态合并：按 content 归一化去重；已存在的待办若新结果标记 done，则更新为完成
-    function mergeTodos(agentId, items, npcName = null) {
-        const mem = npcName
-            ? getCharacterMemory(agentId).npcs[npcName]
-            : getCharacterMemory(agentId);
+    function mergeTodos(agentId, items, npcName = null, promotedName = null) {
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         if (!mem) return;
         if (!Array.isArray(mem.todos)) mem.todos = [];
 
@@ -467,10 +481,8 @@
         saveSettings();
     }
 
-    function updatePartitionItem(agentId, partition, index, newItem, npcName = null) {
-        const mem = npcName
-            ? getCharacterMemory(agentId).npcs[npcName]
-            : getCharacterMemory(agentId);
+    function updatePartitionItem(agentId, partition, index, newItem, npcName = null, promotedName = null) {
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         if (!mem || !Array.isArray(mem[partition]) || index < 0 || index >= mem[partition].length) {
             return false;
         }
@@ -480,10 +492,8 @@
         return true;
     }
 
-    function removePartitionItem(agentId, partition, index, npcName = null) {
-        const mem = npcName
-            ? getCharacterMemory(agentId).npcs[npcName]
-            : getCharacterMemory(agentId);
+    function removePartitionItem(agentId, partition, index, npcName = null, promotedName = null) {
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         if (!mem || !Array.isArray(mem[partition]) || index < 0 || index >= mem[partition].length) {
             return false;
         }
@@ -505,10 +515,8 @@
         saveSettings();
     }
 
-    function markTodoDone(agentId, index, npcName = null) {
-        const mem = npcName
-            ? getCharacterMemory(agentId).npcs[npcName]
-            : getCharacterMemory(agentId);
+    function markTodoDone(agentId, index, npcName = null, promotedName = null) {
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         if (!mem || !Array.isArray(mem.todos) || index < 0 || index >= mem.todos.length) {
             return false;
         }
@@ -629,57 +637,91 @@
         return false;
     }
 
-    // NPC 打包升级为主要角色：把该 NPC 的全部分区数据合并进主角色记忆库，
-    // 然后删除原 NPC 档。之后该角色会像主要角色一样被全量注入上下文、参与互动。
+    // =====================================================================
+    // 多主要角色（promoted）存储层
+    // =====================================================================
+    // 升级后的主要角色不再合并进原主角，而是拥有独立的完整档案：
+    // db[agentId].promoted[name] = createEmptyMemory()（含全套分区）。
+    // 每个升级角色与原主角地位完全一致，功能齐全、可独立读写持久化。
+
+    // 列出所有「升级为主要角色」的名字
+    function listPromoted(agentId) {
+        const mem = getCharacterMemory(agentId);
+        return Object.keys(mem.promoted || {});
+    }
+
+    // 获取某个升级主要角色的记忆对象（不存在则返回 null）
+    function getPromotedMemory(agentId, name) {
+        const mem = getCharacterMemory(agentId);
+        return mem.promoted?.[name] || null;
+    }
+
+    // 确保升级主要角色档案存在（不存在则新建完整空记忆）
+    function ensurePromotedMemory(agentId, name, identity = '') {
+        const mem = getCharacterMemory(agentId);
+        if (!mem.promoted) mem.promoted = {};
+        if (!mem.promoted[name]) {
+            mem.promoted[name] = createEmptyMemory();
+            mem.promoted[name].meta.is_promoted = true;
+            mem.promoted[name].meta.name = name;
+            mem.promoted[name].meta.identity = identity || '';
+            saveSettings();
+        } else if (identity && !mem.promoted[name].meta.identity) {
+            mem.promoted[name].meta.identity = identity;
+            saveSettings();
+        }
+        return mem.promoted[name];
+    }
+
+    // 删除一个升级主要角色档案（不降级回 NPC，直接删除独立窗口）
+    function removePromoted(agentId, name) {
+        const mem = getCharacterMemory(agentId);
+        if (mem.promoted && mem.promoted[name]) {
+            delete mem.promoted[name];
+            saveSettings();
+            return true;
+        }
+        return false;
+    }
+
+    // 清空某个升级主要角色的全部记忆（保留档案本身）
+    function clearPromotedMemory(agentId, name) {
+        const mem = getCharacterMemory(agentId);
+        if (!mem.promoted || !mem.promoted[name]) return false;
+        mem.promoted[name] = createEmptyMemory();
+        mem.promoted[name].meta.is_promoted = true;
+        mem.promoted[name].meta.name = name;
+        mem.promoted[name].meta.identity = mem.promoted[name].meta.identity || '';
+        mem.meta.updated_at = Date.now();
+        saveSettings();
+        return true;
+    }
+
+    // NPC 升级为主要角色：把该 NPC 的完整记忆「搬运」为独立主要角色档案（promoted[name]），
+    // 不再合并进原主角。之后该角色拥有与原主角完全一致的全套功能模块（日记本、纪念日、
+    // 情感流转、专属数据等），可独立读写持久化。
     function promoteNpcToMain(agentId, npcName) {
         const mem = getCharacterMemory(agentId);
         const npcMem = mem.npcs?.[npcName];
         if (!npcMem) return false;
 
-        // 迁移的分区：数组类分区直接 concat，并做去重
-        const ARRAY_PARTS = [
+        // 建立独立主要角色档案（复用 NPC 已有的完整记忆对象，原地搬运）
+        if (!mem.promoted) mem.promoted = {};
+        const target = createEmptyMemory();
+        // 拷贝全部分区数据（关键事件/日记/情感流转/待办/物品/纪念日/情绪标签）
+        for (const part of [
             'key_events', 'character_diary', 'emotion_flow', 'todos',
             'important_items', 'special_occasions', 'emotional_tags',
-        ];
-
-        for (const part of ARRAY_PARTS) {
-            const src = npcMem[part];
-            if (!Array.isArray(src) || !src.length) continue;
-            if (!Array.isArray(mem[part])) mem[part] = [];
-
-            for (const item of src) {
-                // 去重：与主角色已有条目比较（对象按 content 归一化，字符串按原值）
-                const dup = mem[part].some((exist) => {
-                    if (typeof item === 'string' || typeof exist === 'string') {
-                        return normalizeStr(itemTextRaw(item)) === normalizeStr(itemTextRaw(exist));
-                    }
-                    const aContent = normalizeStr(item?.content);
-                    const aDate = normalizeStr(item?.date);
-                    const bContent = normalizeStr(exist?.content);
-                    const bDate = normalizeStr(exist?.date);
-                    // key_events / diary / emotion_flow 用 content+date；其他对象按 content
-                    return aContent === bContent && (aDate === bDate || !aDate || !bDate);
-                });
-                if (!dup) mem[part].push(item);
-            }
+        ]) {
+            if (Array.isArray(npcMem[part])) target[part] = npcMem[part].slice();
         }
-
-        // 迁移情感流转之外，把 NPC 的 meta（身份）作为一条关键事件补充进主角
-        const identity = npcMem?.meta?.identity || '';
-        if (identity) {
-            const ev = {
-                date: '',
-                content: `${npcName} 的身份：${identity}`,
-                keywords: [npcName],
-                emotions: [],
-            };
-            const dup = (mem.key_events || []).some((e) =>
-                normalizeStr(e?.content) === normalizeStr(ev.content));
-            if (!dup) {
-                if (!Array.isArray(mem.key_events)) mem.key_events = [];
-                mem.key_events.push(ev);
-            }
-        }
+        // 继承 NPC 的元信息（身份/建档名）
+        target.meta.is_promoted = true;
+        target.meta.name = npcName;
+        target.meta.identity = npcMem?.meta?.identity || '';
+        target.meta.created_at = npcMem?.meta?.created_at || Date.now();
+        target.meta.updated_at = Date.now();
+        mem.promoted[npcName] = target;
 
         // 删除原 NPC 档
         delete mem.npcs[npcName];
@@ -735,6 +777,12 @@
         root.style.setProperty('--ltm-bg2', t.bg2);
         root.style.setProperty('--ltm-aux', t.aux);
         root.style.setProperty('--ltm-text', t.text);
+        // 夜间模式标记：给抽屉加 data-theme-dark 属性，供 CSS 做深色专用覆盖
+        const drawer = document.getElementById('ltm-panel-drawer');
+        if (drawer) {
+            if (t.dark) drawer.setAttribute('data-theme-dark', '1');
+            else drawer.removeAttribute('data-theme-dark');
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1750,6 +1798,39 @@
             }
         }
 
+        // ============ 升级主要角色：始终注入其核心记忆（与原主角同等地位，参与互动） ============
+        const promotedNames = listPromoted(agentId);
+        for (const pname of promotedNames) {
+            const pm = getPromotedMemory(agentId, pname);
+            if (!pm) continue;
+            const pParts = [];
+            const pEvents = pm.key_events || [];
+            if (pEvents.length) {
+                const evText = pEvents.slice(-6).map((ev) => {
+                    if (typeof ev === 'string') return ev;
+                    const dt = ev.date ? `[${ev.date}]` : '';
+                    return dt ? `${ev.content}（${dt}）` : ev.content;
+                }).filter(Boolean).join('；');
+                if (evText) pParts.push(`关键事件：${evText}`);
+            }
+            const pTodos = (pm.todos || []).filter((t) => !(t && t.done));
+            if (pTodos.length) {
+                pParts.push(`待办：${pTodos.map((t) => (typeof t === 'string' ? t : t.content)).filter(Boolean).join('；')}`);
+            }
+            const pFlows = pm.emotion_flow || [];
+            if (pFlows.length) {
+                const latest = pFlows[pFlows.length - 1];
+                if (typeof latest === 'object' && latest.content) {
+                    pParts.push(`关系：${latest.content}${latest.affection ? '（好感度：' + latest.affection + '）' : ''}`);
+                }
+            }
+            const identity = pm?.meta?.identity || '';
+            if (pParts.length) {
+                const label = identity ? `${pname}（${identity}）` : pname;
+                push(`【主要角色·${label}】记忆`, pParts.join('；'));
+            }
+        }
+
         // ============ 三、清理一次性标记 ============
         if (mem.meta && mem.meta.pendingFlowInjection === true) {
             mem.meta.pendingFlowInjection = false;
@@ -1865,6 +1946,7 @@
     ];
 
     let currentNpc = null;
+    let currentPromoted = null;   // 当前选中的「升级主要角色」名字（null = 未选中）
     let currentPart = 'key_events';
     let currentView = 'memory';
     // 自动总结并发保护标志（模块级，非持久化，避免刷新/崩溃后残留卡死）
@@ -1989,6 +2071,12 @@
 .ltm-range-row{display:flex;gap:8px;align-items:center;}
 .ltm-range-row .ltm-input{flex:1;min-width:0;}
 .ltm-range-sep{flex-shrink:0;color:var(--ltm-accent-dark);font-weight:700;}
+/* 可折叠区块：点击标题切换展开/收起 */
+.ltm-collapse-head{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;-webkit-user-select:none;}
+.ltm-collapse-head .ltm-collapse-caret{transition:transform .2s ease;color:var(--ltm-gold);}
+.ltm-collapse-body{overflow:hidden;max-height:0;opacity:0;transition:max-height .25s ease,opacity .25s ease;}
+.ltm-collapsible.ltm-expanded .ltm-collapse-body{max-height:1200px;opacity:1;}
+.ltm-collapsible.ltm-expanded .ltm-collapse-caret{transform:rotate(180deg);}
 .ltm-theme-row{display:flex;gap:14px;align-items:center;padding:6px 0;}
 .ltm-theme-dot{width:38px;height:38px;border-radius:50%;cursor:pointer;border:3px solid transparent;box-shadow:0 0 0 1px rgba(0,0,0,.15);transition:transform .15s ease,border-color .15s ease;flex-shrink:0;}
 .ltm-theme-dot:hover{transform:scale(1.1);}
@@ -2020,6 +2108,23 @@
     .ltm-drawer-close{width:40px;height:40px;font-size:1.15rem;flex-shrink:0;}
     .ltm-nav-tabs{padding-left:calc(16px + env(safe-area-inset-left,0px));padding-right:calc(16px + env(safe-area-inset-right,0px));}
 }
+/* ===== 夜间模式（深色）专用覆盖：修正硬编码浅色元素在深底下的可读性 ===== */
+#ltm-panel-drawer[data-theme-dark] .ltm-char-card,
+#ltm-panel-drawer[data-theme-dark] .ltm-item-card{background:rgba(255,255,255,.08);border-color:rgba(156,92,255,.35);}
+#ltm-panel-drawer[data-theme-dark] .ltm-card-title{border-bottom-color:rgba(156,92,255,.3);}
+#ltm-panel-drawer[data-theme-dark] .ltm-pill{background:rgba(255,255,255,.08);border-color:rgba(156,92,255,.3);}
+#ltm-panel-drawer[data-theme-dark] .ltm-pill.ltm-active{background:var(--ltm-accent);color:#fff;}
+#ltm-panel-drawer[data-theme-dark] .ltm-input,
+#ltm-panel-drawer[data-theme-dark] .ltm-textarea{background:#2c2c38;color:#f0eef8;border-color:#4a4a5a;}
+#ltm-panel-drawer[data-theme-dark] .ltm-input:focus,
+#ltm-panel-drawer[data-theme-dark] .ltm-textarea:focus{background:#323240;border-color:var(--ltm-accent);box-shadow:0 0 0 3px rgba(156,92,255,.18);}
+#ltm-panel-drawer[data-theme-dark] .ltm-hint{color:#cfc9e0;background:rgba(156,92,255,.12);border-color:rgba(156,92,255,.3);}
+#ltm-panel-drawer[data-theme-dark] .ltm-meta-val{color:#e0dbf0;border-bottom-color:rgba(156,92,255,.25);}
+#ltm-panel-drawer[data-theme-dark] .ltm-item-desc{color:#b5b0c8;}
+#ltm-panel-drawer[data-theme-dark] .ltm-tag{color:#e8e0f5;background:rgba(156,92,255,.18);border-color:rgba(156,92,255,.4);}
+#ltm-panel-drawer[data-theme-dark] .ltm-nav-tabs{background:rgba(255,255,255,.04);border-bottom-color:rgba(156,92,255,.25);}
+#ltm-panel-drawer[data-theme-dark] .ltm-item{border-bottom-color:rgba(156,92,255,.15);}
+#ltm-panel-drawer[data-theme-dark] .ltm-done .ltm-item-text{color:#8a84a0;}
         `;
         document.head.appendChild(style);
     }
@@ -2037,9 +2142,9 @@
             <div class="ltm-fab-label">记忆宫殿</div>
         </div>
         <div id="ltm-panel-overlay"></div>
-        <aside id="ltm-panel-drawer" style="background-color:#f6f1e6;background-image:linear-gradient(160deg,#f6f1e6,#efe6d3);">
+        <aside id="ltm-panel-drawer">
             <div class="ltm-drawer-head">
-                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v2.6.0</span></div>
+                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v2.7.0</span></div>
                 <button class="ltm-drawer-close" id="ltm-panel-close"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="ltm-nav-tabs" id="ltm-nav-tabs">
@@ -2266,6 +2371,7 @@
         const groupNames = getGroupCharNames();
         const chars = groupNames.length > 1 ? groupNames : [getCharName()];
 
+        // 当前主角卡（原主角）
         const charCards = chars.map((name) => {
             return `<div class="ltm-char-card" data-char="${esc(name)}">
                 <div class="ltm-char-icon"><i class="fa-solid fa-user-ninja"></i></div>
@@ -2273,14 +2379,32 @@
             </div>`;
         }).join('');
 
+        // 升级为主要角色的独立档案列表
+        const promotedNames = listPromoted(agentId);
+        const promotedCards = promotedNames.length
+            ? promotedNames.map((name) => {
+                const pm = getPromotedMemory(agentId, name);
+                const identity = pm?.meta?.identity || '';
+                const label = identity ? `${name} · ${identity}` : name;
+                return `<div class="ltm-char-card" data-promoted="${esc(name)}">
+                    <div class="ltm-char-icon"><i class="fa-solid fa-crown"></i></div>
+                    <div class="ltm-char-name">${esc(label)}</div>
+                    <button class="ltm-card-delete" data-act="del-promoted" data-promoted="${esc(name)}" title="删除该主要角色独立档案"><i class="fa-solid fa-trash"></i></button>
+                </div>`;
+            }).join('')
+            : '<div class="ltm-empty">（暂无升级的主要角色。可在 NPC 栏把 NPC 升级为主要角色。）</div>';
+
         return `
         <div class="ltm-view ltm-active">
             <div class="ltm-card">
                 <div class="ltm-card-title">
                     <span class="ltm-title-left"><i class="fa-solid fa-users"></i> 选择角色</span>
                 </div>
+                <div class="ltm-sub-title"><i class="fa-solid fa-user-ninja"></i> 当前主角</div>
                 <div class="ltm-grid">${charCards}</div>
-                <p class="ltm-hint"><i class="fa-solid fa-circle-info"></i> 点击角色查看并编辑其记忆。多人卡中每个角色独立建档，互不干扰。</p>
+                <div class="ltm-sub-title" style="margin-top:14px;"><i class="fa-solid fa-crown"></i> 升级的主要角色（独立窗口）</div>
+                <div class="ltm-grid">${promotedCards}</div>
+                <p class="ltm-hint"><i class="fa-solid fa-circle-info"></i> 点击角色查看并编辑其记忆。升级的主要角色拥有与原主角完全一致的全套功能，独立存储、互不干扰。</p>
             </div>
             <div id="ltm-memory-detail"></div>
         </div>`;
@@ -2288,12 +2412,29 @@
 
     function renderMemoryDetail(agentId, charName) {
         currentNpc = null;
+        currentPromoted = null;
         currentPart = 'key_events';
         return `
         <div class="ltm-card">
             <div class="ltm-card-title">
                 <span class="ltm-title-left"><i class="fa-solid fa-book-open-reader"></i> 「${esc(charName)}」记忆库</span>
                 <button class="ltm-btn ltm-btn-danger ltm-btn-sm" data-act="clear-all">清空全部</button>
+            </div>
+            ${renderPartitionTabs()}
+            <div id="ltm-part-content"></div>
+        </div>`;
+    }
+
+    // 升级主要角色的独立详情窗口（与原主角详情结构一致，全套分区）
+    function renderPromotedDetail(agentId, name) {
+        currentNpc = null;
+        currentPromoted = name;
+        currentPart = 'key_events';
+        return `
+        <div class="ltm-card">
+            <div class="ltm-card-title">
+                <span class="ltm-title-left"><i class="fa-solid fa-crown"></i> 「${esc(name)}」主要角色档案</span>
+                <button class="ltm-btn ltm-btn-danger ltm-btn-sm" data-act="clear-promoted" data-promoted="${esc(name)}">清空全部</button>
             </div>
             ${renderPartitionTabs()}
             <div id="ltm-part-content"></div>
@@ -2308,17 +2449,17 @@
         return `<div class="ltm-pill-group">${tabs}</div>`;
     }
 
-    function renderPartitionContent(agentId, npcName) {
-        const mem = npcName ? getNpcMemory(agentId, npcName) : getCharacterMemory(agentId);
+    function renderPartitionContent(agentId, npcName, promotedName) {
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         const arr = mem?.[currentPart] || [];
         const isTag = currentPart === 'emotional_tags';
 
         let body = '';
         if (isTag) {
-            body = renderTags(arr, agentId, npcName);
+            body = renderTags(arr, agentId, npcName, promotedName);
         } else {
             body = arr.length
-                ? arr.map((it, i) => renderEditableItem(currentPart, it, i, agentId, npcName)).join('')
+                ? arr.map((it, i) => renderEditableItem(currentPart, it, i, agentId, npcName, promotedName)).join('')
                 : '<div class="ltm-empty">（暂无内容）</div>';
         }
 
@@ -2326,34 +2467,37 @@
 
         return `
         ${body}
-        <button class="ltm-btn-add" data-act="add" data-part="${currentPart}" data-npc="${esc(npcName || '')}">
+        <button class="ltm-btn-add" data-act="add" data-part="${currentPart}" data-npc="${esc(npcName || '')}" data-promoted="${esc(promotedName || '')}">
             <i class="fa-solid fa-plus"></i> ${addLabel}
         </button>`;
     }
 
-    function renderTags(arr, agentId, npcName) {
+    function renderTags(arr, agentId, npcName, promotedName) {
         if (!arr.length) return '<div class="ltm-empty">（暂无标签）</div>';
+        const npcAttr = esc(npcName || '');
+        const proAttr = esc(promotedName || '');
         return `<div class="ltm-tag-list">
             ${arr.map((tag, i) => `
                 <span class="ltm-tag">
-                    <span contenteditable="true" data-editable data-part="emotional_tags" data-idx="${i}" data-npc="${esc(npcName || '')}">${esc(tag)}</span>
-                    <span class="ltm-tag-del" data-act="del" data-part="emotional_tags" data-idx="${i}" data-npc="${esc(npcName || '')}">×</span>
+                    <span contenteditable="true" data-editable data-part="emotional_tags" data-idx="${i}" data-npc="${npcAttr}" data-promoted="${proAttr}" data-promoted="${proAttr}">${esc(tag)}</span>
+                    <span class="ltm-tag-del" data-act="del" data-part="emotional_tags" data-idx="${i}" data-npc="${npcAttr}" data-promoted="${proAttr}" data-promoted="${proAttr}">×</span>
                 </span>`).join('')}
         </div>`;
     }
 
-    function renderEditableItem(part, item, index, agentId, npcName) {
+    function renderEditableItem(part, item, index, agentId, npcName, promotedName) {
         const npcAttr = esc(npcName || '');
+        const proAttr = esc(promotedName || '');
 
         if (part === 'todos') {
             const content = typeof item === 'string' ? item : item.content;
             const done = typeof item === 'object' && item.done;
             return `
             <div class="ltm-item ${done ? 'ltm-done' : ''}">
-                <span class="ltm-item-text" contenteditable="true" data-editable data-part="todos" data-idx="${index}" data-npc="${npcAttr}">${esc(content)}</span>
+                <span class="ltm-item-text" contenteditable="true" data-editable data-part="todos" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(content)}</span>
                 <div class="ltm-item-actions">
-                    ${!done ? `<button class="ltm-btn ltm-btn-sm" data-act="todo-done" data-idx="${index}" data-npc="${npcAttr}">完成</button>` : ''}
-                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="todos" data-idx="${index}" data-npc="${npcAttr}">删</button>
+                    ${!done ? `<button class="ltm-btn ltm-btn-sm" data-act="todo-done" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">完成</button>` : ''}
+                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="todos" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">删</button>
                 </div>
             </div>`;
         }
@@ -2364,11 +2508,11 @@
             return `
             <div class="ltm-item">
                 <div class="ltm-item-text" style="flex-direction:column;display:flex;gap:2px;">
-                    <b contenteditable="true" data-editable data-part="important_items" data-idx="${index}" data-field="name" data-npc="${npcAttr}">${esc(name)}</b>
-                    <span style="color:#7a6a5f;font-size:0.78em;" contenteditable="true" data-editable data-part="important_items" data-idx="${index}" data-field="significance" data-npc="${npcAttr}">${esc(sig || '（点击填写意义）')}</span>
+                    <b contenteditable="true" data-editable data-part="important_items" data-idx="${index}" data-field="name" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(name)}</b>
+                    <span style="color:#7a6a5f;font-size:0.78em;" contenteditable="true" data-editable data-part="important_items" data-idx="${index}" data-field="significance" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(sig || '（点击填写意义）')}</span>
                 </div>
                 <div class="ltm-item-actions">
-                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="important_items" data-idx="${index}" data-npc="${npcAttr}">删</button>
+                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="important_items" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">删</button>
                 </div>
             </div>`;
         }
@@ -2379,9 +2523,9 @@
                 // 兼容旧数据：纯字符串
                 return `
                 <div class="ltm-item">
-                    <span class="ltm-item-text" contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-npc="${npcAttr}">${esc(item)}</span>
+                    <span class="ltm-item-text" contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(item)}</span>
                     <div class="ltm-item-actions">
-                        <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="key_events" data-idx="${index}" data-npc="${npcAttr}">删</button>
+                        <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="key_events" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">删</button>
                     </div>
                 </div>`;
             }
@@ -2391,19 +2535,19 @@
             return `
             <div class="ltm-item ltm-event-item">
                 <div class="ltm-item-text" style="flex-direction:column;display:flex;gap:5px;">
-                    <div class="ltm-diary-date" contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="date" data-npc="${npcAttr}">${esc(evDate || '（点此填年月日，如 2036.4.19）')}</div>
-                    <div contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="content" data-npc="${npcAttr}">${esc(item.content || '')}</div>
+                    <div class="ltm-diary-date" contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="date" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(evDate || '（点此填年月日，如 2036.4.19）')}</div>
+                    <div contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="content" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(item.content || '')}</div>
                     <div class="ltm-event-meta">
                         <span class="ltm-meta-label">关键词</span>
-                        <span contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="keywords" data-npc="${npcAttr}" class="ltm-meta-val">${esc(keywords)}</span>
+                        <span contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="keywords" data-npc="${npcAttr}" data-promoted="${proAttr}" class="ltm-meta-val">${esc(keywords)}</span>
                     </div>
                     <div class="ltm-event-meta">
                         <span class="ltm-meta-label">情绪</span>
-                        <span contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="emotions" data-npc="${npcAttr}" class="ltm-meta-val">${esc(emotions)}</span>
+                        <span contenteditable="true" data-editable data-part="key_events" data-idx="${index}" data-field="emotions" data-npc="${npcAttr}" data-promoted="${proAttr}" class="ltm-meta-val">${esc(emotions)}</span>
                     </div>
                 </div>
                 <div class="ltm-item-actions">
-                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="key_events" data-idx="${index}" data-npc="${npcAttr}">删</button>
+                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="key_events" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">删</button>
                 </div>
             </div>`;
         }
@@ -2413,9 +2557,9 @@
             if (typeof item === 'string') {
                 return `
                 <div class="ltm-item">
-                    <span class="ltm-item-text" contenteditable="true" data-editable data-part="character_diary" data-idx="${index}" data-npc="${npcAttr}">${esc(item)}</span>
+                    <span class="ltm-item-text" contenteditable="true" data-editable data-part="character_diary" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(item)}</span>
                     <div class="ltm-item-actions">
-                        <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="character_diary" data-idx="${index}" data-npc="${npcAttr}">删</button>
+                        <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="character_diary" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">删</button>
                     </div>
                 </div>`;
             }
@@ -2423,11 +2567,11 @@
             return `
             <div class="ltm-item">
                 <div class="ltm-item-text" style="flex-direction:column;display:flex;gap:3px;">
-                    <div class="ltm-diary-date" contenteditable="true" data-editable data-part="character_diary" data-idx="${index}" data-field="date" data-npc="${npcAttr}">${esc(date || '（点此填日期，如 4.19）')}</div>
-                    <div contenteditable="true" data-editable data-part="character_diary" data-idx="${index}" data-field="content" data-npc="${npcAttr}">${esc(item.content || '')}</div>
+                    <div class="ltm-diary-date" contenteditable="true" data-editable data-part="character_diary" data-idx="${index}" data-field="date" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(date || '（点此填日期，如 4.19）')}</div>
+                    <div contenteditable="true" data-editable data-part="character_diary" data-idx="${index}" data-field="content" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(item.content || '')}</div>
                 </div>
                 <div class="ltm-item-actions">
-                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="character_diary" data-idx="${index}" data-npc="${npcAttr}">删</button>
+                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="character_diary" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">删</button>
                 </div>
             </div>`;
         }
@@ -2437,9 +2581,9 @@
             if (typeof item === 'string') {
                 return `
                 <div class="ltm-item">
-                    <span class="ltm-item-text" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-npc="${npcAttr}">${esc(item)}</span>
+                    <span class="ltm-item-text" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(item)}</span>
                     <div class="ltm-item-actions">
-                        <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="emotion_flow" data-idx="${index}" data-npc="${npcAttr}">删</button>
+                        <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="emotion_flow" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">删</button>
                     </div>
                 </div>`;
             }
@@ -2449,22 +2593,22 @@
             return `
             <div class="ltm-item">
                 <div class="ltm-item-text" style="flex-direction:column;display:flex;gap:3px;">
-                    <div class="ltm-diary-date" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="date" data-npc="${npcAttr}">${esc(flowDate || '（点此填日期区间，如 2036.4.1-2036.4.19）')}</div>
-                    <div contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="content" data-npc="${npcAttr}">${esc(item.content || '')}</div>
-                    <div class="ltm-affection" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="affection" data-npc="${npcAttr}">${esc(affection ? '好感度：' + affection : '（点击填好感度）')}</div>
-                    <div class="ltm-affection" style="color:#5e7a3e;" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="relationship" data-npc="${npcAttr}">${esc(relationship ? '关系：' + relationship : '（点击填关系定位）')}</div>
+                    <div class="ltm-diary-date" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="date" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(flowDate || '（点此填日期区间，如 2036.4.1-2036.4.19）')}</div>
+                    <div contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="content" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(item.content || '')}</div>
+                    <div class="ltm-affection" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="affection" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(affection ? '好感度：' + affection : '（点击填好感度）')}</div>
+                    <div class="ltm-affection" style="color:#5e7a3e;" contenteditable="true" data-editable data-part="emotion_flow" data-idx="${index}" data-field="relationship" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(relationship ? '关系：' + relationship : '（点击填关系定位）')}</div>
                 </div>
                 <div class="ltm-item-actions">
-                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="emotion_flow" data-idx="${index}" data-npc="${npcAttr}">删</button>
+                    <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="emotion_flow" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">删</button>
                 </div>
             </div>`;
         }
 
         return `
         <div class="ltm-item">
-            <span class="ltm-item-text" contenteditable="true" data-editable data-part="${part}" data-idx="${index}" data-npc="${npcAttr}">${esc(item)}</span>
+            <span class="ltm-item-text" contenteditable="true" data-editable data-part="${part}" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">${esc(item)}</span>
             <div class="ltm-item-actions">
-                <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="${part}" data-idx="${index}" data-npc="${npcAttr}">删</button>
+                <button class="ltm-btn ltm-btn-sm ltm-btn-danger" data-act="del" data-part="${part}" data-idx="${index}" data-npc="${npcAttr}" data-promoted="${proAttr}">删</button>
             </div>
         </div>`;
     }
@@ -2639,18 +2783,23 @@
                 <p class="ltm-hint" id="ltm-summarize-status" style="display:none;margin-top:10px;"></p>
             </div>
 
-            <div class="ltm-card">
-                <div class="ltm-card-title"><span class="ltm-title-left"><i class="fa-solid fa-palette"></i> 主题换肤</span></div>
-                <p class="ltm-hint" style="margin-top:0;"><i class="fa-solid fa-circle-info"></i> 点击圆形色块切换面板主题色。</p>
-                ${Object.keys(THEMES).map((key) => {
-                    const t = THEMES[key];
-                    const active = (s.theme || 'default') === key ? 'ltm-active' : '';
-                    return `
-                    <div class="ltm-theme-row">
-                        <div class="ltm-theme-dot ${active}" data-act="set-theme" data-theme="${key}" title="${esc(t.name)}" style="background:linear-gradient(135deg,${t.accent},${t.bg});"></div>
-                        <span class="ltm-theme-name">${esc(t.name)}</span>
-                    </div>`;
-                }).join('')}
+            <div class="ltm-card ltm-collapsible" data-collapse="theme">
+                <div class="ltm-card-title ltm-collapse-head" data-collapse-toggle="theme">
+                    <span class="ltm-title-left"><i class="fa-solid fa-palette"></i> 皮肤颜色与主题设置</span>
+                    <i class="fa-solid fa-chevron-down ltm-collapse-caret"></i>
+                </div>
+                <div class="ltm-collapse-body">
+                    <p class="ltm-hint" style="margin-top:0;"><i class="fa-solid fa-circle-info"></i> 点击圆形色块切换面板主题色，支持夜间模式。</p>
+                    ${Object.keys(THEMES).map((key) => {
+                        const t = THEMES[key];
+                        const active = (s.theme || 'default') === key ? 'ltm-active' : '';
+                        return `
+                        <div class="ltm-theme-row">
+                            <div class="ltm-theme-dot ${active}" data-act="set-theme" data-theme="${key}" title="${esc(t.name)}" style="background:linear-gradient(135deg,${t.accent},${t.bg});"></div>
+                            <span class="ltm-theme-name">${esc(t.name)}</span>
+                        </div>`;
+                    }).join('')}
+                </div>
             </div>
 
             <div class="ltm-card">
@@ -2693,11 +2842,14 @@
     }
 
     function renderNpcDetail(npcName) {
+        currentNpc = npcName;
+        currentPromoted = null;
+        currentPart = 'key_events';
         return `
         <div class="ltm-card">
             <div class="ltm-card-title">
                 <span class="ltm-title-left"><i class="fa-solid fa-id-card"></i> 「${esc(npcName)}」独立档案</span>
-                <button class="ltm-btn ltm-btn-sm" data-act="promote-npc" data-npc="${esc(npcName)}" title="打包移动到主要角色记忆库，之后像主角一样互动">
+                <button class="ltm-btn ltm-btn-sm" data-act="promote-npc" data-npc="${esc(npcName)}" title="升级为独立主要角色窗口（拥有全套功能）">
                     <i class="fa-solid fa-arrow-up"></i> 升级为主角
                 </button>
             </div>
@@ -2711,7 +2863,7 @@
         if (!agentId) return;
         const container = document.getElementById('ltm-part-content');
         if (container) {
-            container.innerHTML = renderPartitionContent(agentId, currentNpc);
+            container.innerHTML = renderPartitionContent(agentId, currentNpc, currentPromoted);
         } else {
             // 兜底：「其他」页（待办/重要物品）等视图没有 #ltm-part-content 容器，
             // 之前在这里静默返回，导致增删后界面毫无反应、必须切页才能看到更新。
@@ -2744,30 +2896,54 @@
 
     function handleClick(e) {
         const agentId = getAgentId();
+
+        // 折叠区块切换（点击标题展开/收起，独立于 data-act 逻辑）
+        const collapseToggle = e.target.closest('[data-collapse-toggle]');
+        if (collapseToggle) {
+            const key = collapseToggle.dataset.collapseToggle;
+            const block = collapseToggle.closest('.ltm-collapsible');
+            if (block) block.classList.toggle('ltm-expanded');
+            return;
+        }
+
         const btn = e.target.closest('[data-act]');
         if (btn) {
             const act = btn.dataset.act;
             const part = btn.dataset.part;
             const idx = parseInt(btn.dataset.idx, 10);
-            // 关键：操作目标一律以按钮上的 data-npc 为准（渲染时已绑定盖章）。
-            // 空串/缺失 = 主角色记忆，非空 = 对应 NPC 专属分区。
-            // 不再依赖 currentNpc 交叉判断，杜绝残留状态导致 NPC 条目误写进主角色库。
+            // 关键：操作目标一律以按钮上的 data-npc / data-promoted 为准（渲染时已绑定盖章）。
+            // data-promoted 非空 → 升级主要角色；否则 data-npc 非空 → NPC；都空 → 主角色。
             const npc = btn.dataset.npc || null;
+            const promoted = btn.dataset.promoted || null;
             const npcName = npc;
+            const promotedName = promoted;
 
             switch (act) {
                 case 'del':
-                    removePartitionItem(agentId, part, idx, npcName);
+                    removePartitionItem(agentId, part, idx, npcName, promotedName);
                     // 只局部刷新当前分区内容，保持停留在当前编辑界面，不跳回主界面
                     renderPartContentOnly();
                     break;
                 case 'todo-done':
-                    markTodoDone(agentId, idx, npcName);
+                    markTodoDone(agentId, idx, npcName, promotedName);
                     renderPartContentOnly();
                     break;
                 case 'clear-all':
                     if (confirm(`确定清空「${getCharName()}」的全部记忆吗？此操作不可恢复。`)) {
                         clearMemory(agentId);
+                        renderCurrentView();
+                    }
+                    break;
+                case 'clear-promoted':
+                    if (confirm(`确定清空主要角色「${promoted}」的全部记忆吗？此操作不可恢复。`)) {
+                        clearPromotedMemory(agentId, promoted);
+                        renderCurrentView();
+                    }
+                    break;
+                case 'del-promoted':
+                    if (confirm(`确定删除主要角色「${promoted}」的独立档案吗？其全部记忆将被移除。`)) {
+                        removePromoted(agentId, promoted);
+                        currentPromoted = null;
                         renderCurrentView();
                     }
                     break;
@@ -2778,16 +2954,17 @@
                     }
                     break;
                 case 'promote-npc': {
-                    // NPC 打包升级为主要角色：合并进主角记忆库并删除原 NPC 档
-                    if (confirm(`确定把 NPC「${npc}」的全部记忆打包移动到主要角色「${getCharName()}」的记忆库吗？\n\n移动后该 NPC 将从 NPC 列表移除，其关键事件、待办、物品、日记、情感流转等会并入主角，之后会像主要角色一样参与互动。`)) {
+                    // NPC 升级为主要角色：搬运为独立主要角色档案（不再合并进原主角）
+                    if (confirm(`确定把 NPC「${npc}」升级为主要角色吗？\n\n升级后将为其生成一个独立的角色窗口（拥有与原主角完全一致的全套功能：日记本、纪念日、情感流转、专属数据等），并从 NPC 列表移除。`)) {
                         const ok = promoteNpcToMain(agentId, npc);
                         if (ok) {
-                            toastr?.success?.(`记忆宫殿：已把「${npc}」升级为主要角色`);
-                            console.log(`[记忆宫殿] 已将 NPC「${npc}」打包移动为主角记忆`);
+                            toastr?.success?.(`记忆宫殿：已把「${npc}」升级为独立主要角色`);
+                            console.log(`[记忆宫殿] 已将 NPC「${npc}」升级为独立主要角色窗口`);
                         } else {
                             toastr?.error?.(`记忆宫殿：未找到 NPC「${npc}」`);
                         }
                         currentNpc = null;
+                        currentPromoted = null;
                         currentPart = 'key_events';
                         renderCurrentView();
                     }
@@ -2811,22 +2988,22 @@
                     break;
                 }
                 case 'add': {
-                    // 关键修复：必须把 npcName 传给 addToPartition，
-                    // 否则在 NPC 详情里手动添加的条目会全部写进主角色（char）记忆库。
+                    // 关键修复：必须把 npcName / promotedName 传给 addToPartition，
+                    // 否则在 NPC/升级角色详情里手动添加的条目会全部写进主角色（char）记忆库。
                     if (part === 'important_items') {
-                        addToPartition(agentId, part, { name: '新物品', significance: '物品描述……' }, npcName);
+                        addToPartition(agentId, part, { name: '新物品', significance: '物品描述……' }, npcName, promotedName);
                     } else if (part === 'emotional_tags') {
-                        addToPartition(agentId, part, '新标签', npcName);
+                        addToPartition(agentId, part, '新标签', npcName, promotedName);
                     } else if (part === 'todos') {
-                        addToPartition(agentId, part, { content: '新的待办事项', done: false }, npcName);
+                        addToPartition(agentId, part, { content: '新的待办事项', done: false }, npcName, promotedName);
                     } else if (part === 'key_events') {
-                        addToPartition(agentId, part, { date: '', content: '新事件', keywords: [], emotions: [] }, npcName);
+                        addToPartition(agentId, part, { date: '', content: '新事件', keywords: [], emotions: [] }, npcName, promotedName);
                     } else if (part === 'character_diary') {
-                        addToPartition(agentId, part, { date: '', content: '新日记' }, npcName);
+                        addToPartition(agentId, part, { date: '', content: '新日记' }, npcName, promotedName);
                     } else if (part === 'emotion_flow') {
-                        addToPartition(agentId, part, { content: '新情感流转', affection: '' }, npcName);
+                        addToPartition(agentId, part, { content: '新情感流转', affection: '' }, npcName, promotedName);
                     } else {
-                        addToPartition(agentId, part, '新条目', npcName);
+                        addToPartition(agentId, part, '新条目', npcName, promotedName);
                     }
                     // 只局部刷新当前分区内容，保持停留在当前编辑界面，绝不跳转
                     renderPartContentOnly();
@@ -2887,6 +3064,20 @@
             const detail = document.getElementById('ltm-memory-detail');
             if (detail) {
                 detail.innerHTML = renderMemoryDetail(agentId, name);
+                renderPartContentOnly();
+            }
+            return;
+        }
+
+        const promotedCard = e.target.closest('.ltm-char-card[data-promoted]');
+        if (promotedCard && !e.target.closest('[data-act]')) {
+            const name = promotedCard.dataset.promoted;
+            currentPromoted = name;
+            currentNpc = null;
+            currentPart = 'key_events';
+            const detail = document.getElementById('ltm-memory-detail');
+            if (detail) {
+                detail.innerHTML = renderPromotedDetail(agentId, name);
                 renderPartContentOnly();
             }
             return;
@@ -2978,10 +3169,11 @@
         const part = el.dataset.part;
         const idx = parseInt(el.dataset.idx, 10);
         const field = el.dataset.field || null;
-        // 与 handleClick 保持一致：以元素上的 data-npc 为准（渲染时已绑定盖章）
+        // 与 handleClick 保持一致：以元素上的 data-npc / data-promoted 为准（渲染时已绑定盖章）
         const npcName = el.dataset.npc || null;
+        const promotedName = el.dataset.promoted || null;
 
-        const mem = npcName ? getNpcMemory(agentId, npcName) : getCharacterMemory(agentId);
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         const arr = mem?.[part];
         if (!arr || idx < 0 || idx >= arr.length) return;
 
@@ -2991,7 +3183,7 @@
             let item = arr[idx];
             if (typeof item === 'string') item = { name: item, significance: '' };
             item[field] = newText;
-            updatePartitionItem(agentId, part, idx, item, npcName);
+            updatePartitionItem(agentId, part, idx, item, npcName, promotedName);
         } else if (field === 'keywords' || field === 'emotions') {
             // 逗号/顿号分隔的词 → 数组
             let item = arr[idx];
@@ -2999,7 +3191,7 @@
             item[field] = newText
                 ? newText.split(/[,，、]/).map((s) => s.trim()).filter(Boolean)
                 : [];
-            updatePartitionItem(agentId, part, idx, item, npcName);
+            updatePartitionItem(agentId, part, idx, item, npcName, promotedName);
         } else if (field === 'date' || field === 'content') {
             // 日期/内容字段：保留原对象结构（key_events / diary / emotion_flow 通用）
             let item = arr[idx];
@@ -3007,17 +3199,17 @@
                 item = { content: item, date: '', keywords: [], emotions: [], affection: '', relationship: '' };
             }
             item[field] = newText;
-            updatePartitionItem(agentId, part, idx, item, npcName);
+            updatePartitionItem(agentId, part, idx, item, npcName, promotedName);
         } else if (field === 'affection' || field === 'relationship') {
             let item = arr[idx];
             if (typeof item === 'string') item = { content: item, date: '', affection: '', relationship: '' };
             item[field] = newText;
-            updatePartitionItem(agentId, part, idx, item, npcName);
+            updatePartitionItem(agentId, part, idx, item, npcName, promotedName);
         } else if (typeof arr[idx] === 'string' && field === null) {
-            updatePartitionItem(agentId, part, idx, newText, npcName);
+            updatePartitionItem(agentId, part, idx, newText, npcName, promotedName);
         } else if (typeof arr[idx] === 'object' && !field) {
             arr[idx].content = newText;
-            updatePartitionItem(agentId, part, idx, arr[idx], npcName);
+            updatePartitionItem(agentId, part, idx, arr[idx], npcName, promotedName);
         }
     }
 
@@ -3195,6 +3387,7 @@
             // 记忆存储键已绑定 chatId，切换后自动指向独立存档。
             eventSource.on(event_types.CHAT_CHANGED, () => {
                 currentNpc = null;
+                currentPromoted = null;
                 currentPart = 'key_events';
                 pendingInjection = '';
                 renderCurrentView();
@@ -3244,6 +3437,11 @@
         listNpcs,
         removeNpc,
         promoteNpcToMain,
+        listPromoted,
+        getPromotedMemory,
+        ensurePromotedMemory,
+        removePromoted,
+        clearPromotedMemory,
         getNpcMemory,
         getAllPrompts,
         savePrompt,
