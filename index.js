@@ -163,6 +163,9 @@
   "special_occasions": ["提到的纪念日/生日/重要日期"],
   "todos": [{"content": "约定/承诺/待办内容", "done": false}],
   "important_items": [{"name": "物品名", "significance": "意义"}],
+  "main_characters": [
+    {"name": "主要角色名", "role": "该角色的身份/与「{{char}}」或用户的关系", "evidence": "该角色在正文中高频出现、深度参与剧情的依据（一句话）"}
+  ],
   "npc": [
     {"name": "NPC名字", "identity": "NPC的身份/与主角的关系", "brief": "关于这个NPC的一句话简略记忆（关键事实，越简略越好）"}
   ]
@@ -174,10 +177,11 @@
 3. 【关键词格式铁律】keywords 里的每一个词必须「极简」：英文只能是一个单词，中文只能是一个 2 字或 3 字的词语。严禁输出长短语、整句话、或 4 字以上的词组。例如：正确「戒指」「告白」「生日」「猫」；错误「一起去海边看日出」「她喜欢的那家咖啡店」。
 4. diary 是带日期的流水账，客观记录事实，不抒发个人情绪。date 用「几月几日」格式（如 4.19、4月19日），方便作为纪念日关键词触发。
 5. emotion_flow 是这一阶段的情感变化总结，必须包含具体日期区间 date、好感度百分比 affection，以及 relationship（char 认为自己现在和 user 的关系）。
-6. npc 是对话中出现的其他角色：name 是名字，identity 是身份（如「掌柜」「师姐」「仇人」），brief 是极简略的一句话记忆。NPC 记忆务必简略，不需要像主要角色那么细致。
-7. todos 里，对话中已经明确「做完、完成、兑现、取消」的约定/承诺，done 必须填 true；只有仍未完成的才填 false。同一个约定若在多段对话里反复出现，只输出一次，且按最新状态判断 done。
-8. important_items 中，同一个物品（名称一致）只能出现一次，不要因为多次提及就重复输出；只有在出现真正重要的物品时才填写，没有就输出空数组。
-9. 没有内容的分区输出空数组 []，严禁虚构、推测、补充不存在的信息。
+6. 【主要角色判定铁律】main_characters 是「除当前角色卡 {{char}} 之外」、在对话正文中真正反复出现、高频互动、深度参与剧情的重要角色实体。绝不能机械地把「角色卡名字/标题」当成主要角色——角色卡名字往往只是一个标题或代号，必须以正文中实际活跃的实体为准。判断依据：该角色在正文中被提及或互动的次数多、有持续戏份、推动剧情、与 {{char}}/用户有实质互动。只有达到「深度参与」程度的才列入 main_characters；偶尔露面的路人、一次性出场角色不要列入。
+7. 【防止重复建档】凡是已经列入 main_characters 的角色，严禁再在 npc 里重复输出。npc 只输出真正的配角、路人、一次性出场角色。
+8. todos 里，对话中已经明确「做完、完成、兑现、取消」的约定/承诺，done 必须填 true；只有仍未完成的才填 false。同一个约定若在多段对话里反复出现，只输出一次，且按最新状态判断 done。
+9. important_items 中，同一个物品（名称一致）只能出现一次，不要因为多次提及就重复输出；只有在出现真正重要的物品时才填写，没有就输出空数组。
+10. 没有内容的分区输出空数组 []，严禁虚构、推测、补充不存在的信息。
 
 【待总结对话】
 {{chunk}}`,
@@ -341,54 +345,181 @@
         return s[PLUGIN_ID].database;
     }
 
+    // 单个「角色 / NPC」的记忆模板（不含全局元信息）。
+    // 每个主要角色、每个 NPC 都持有一份完全相同的分区结构，功能一致、地位平等。
     function createEmptyMemory() {
         return {
-            emotional_tags: [],     // 保留：全局情绪标签池（可选）
-            key_events: [],         // 关键事件：[{content, keywords:[], emotions:[]}]
+            emotional_tags: [],     // 情绪标签：[string]
+            key_events: [],         // 关键事件：[{date, content, keywords:[], emotions:[]}]
             special_occasions: [],  // 纪念日：[string]
             character_diary: [],    // 日记：[{date, content}]
-            emotion_flow: [],       // 情感流转：[{content, affection}]
+            emotion_flow: [],       // 情感流转：[{date, content, affection, relationship}]
             todos: [],              // 待办：[{content, done}]
             important_items: [],    // 重要物品：[{name, significance}]
-            npcs: {},
-            promoted: {},           // 升级的主要角色独立档案：{ 名字: createEmptyMemory() }
+            meta: {
+                created_at: Date.now(),
+                updated_at: Date.now(),
+                is_promoted: false, // 是否「升级为主要角色」（原主角为 false）
+                is_npc: false,      // 是否 NPC
+                name: '',           // 角色名
+                identity: '',       // 身份/与主角关系
+            },
+        };
+    }
+
+    // 全部合法分区字段（用于遍历/迁移/清空）
+    const PARTITION_KEYS = [
+        'emotional_tags', 'key_events', 'special_occasions',
+        'character_diary', 'emotion_flow', 'todos', 'important_items',
+    ];
+
+    // 记忆容器（agent 级顶层结构）——「完全平等」的多主角制的存储根源：
+    //   characters：主要角色集合（原主角 + 升级角色，同级并列，无主次、无等级上限）
+    //   npcs：NPC 集合（保持不变）
+    //   meta：全局元信息（总结进度等，不属于任何单个角色）
+    function createContainer() {
+        return {
+            characters: {},          // { 角色名: createEmptyMemory() }
+            npcs: {},                // { NPC名: createEmptyMemory() }
             meta: {
                 created_at: Date.now(),
                 updated_at: Date.now(),
                 pendingFloors: 0,
                 todoCounter: 0,
-                lastSummarizedFloor: 0,   // 上次总结到的楼层索引
-                pendingFlowInjection: false, // 大总结后下一轮注入情感流转一次
+                lastSummarizedFloor: 0,      // 上次总结到的楼层索引（全局）
+                pendingFlowInjection: false, // 大总结后下一轮注入情感流转一次（全局）
             },
         };
     }
 
-    function getCharacterMemory(agentId) {
-        const db = getDatabase();
-        if (!db[agentId]) {
-            // 迁移：新键（含 chatId）首次访问时，若旧键（不含 chatId）存在历史记忆，
-            // 把它「移动」到当前聊天存档（迁移后删除旧键），避免升级后记忆丢失。
-            // 删除旧键是关键：否则用户再开第二个新聊天时，旧键仍存在，会把旧记忆
-            // 再次复制到新聊天，造成记忆污染。
-            const legacyId = getLegacyAgentId();
-            if (legacyId && legacyId !== agentId && db[legacyId] && db[legacyId].meta) {
-                db[agentId] = db[legacyId];
-                delete db[legacyId];
-                saveSettings();
-            } else {
-                db[agentId] = createEmptyMemory();
-            }
-        }
-        return db[agentId];
+    // 当前 agent 的「原主角」名列表（单卡为一个，群聊为多个成员名）
+    function getMainCharacterNameList() {
+        const names = getGroupCharNames();
+        if (names && names.length) return names;
+        const n = getCharName();
+        return n ? [n] : [];
     }
 
-    // 统一解析「子档案」记忆对象：优先升级主要角色（promoted），其次 NPC，最后主角色。
-    // 返回目标 memory 对象（可能为 null）。
+    // 更新指定角色与全局的 updated_at（修复「操作升级角色却写原主角时间戳」的历史隐患）
+    function touchMemory(agentId, mem) {
+        if (mem && mem.meta) mem.meta.updated_at = Date.now();
+        const container = ensureContainer(agentId);
+        if (container && container.meta) container.meta.updated_at = Date.now();
+    }
+
+    // 确保记忆容器存在，并完成「旧结构 → 新结构」的惰性迁移（幂等）。
+    // 旧结构：顶层直接挂分区字段（key_events 等）+ promoted 子 map + meta 里放总结进度。
+    // 新结构：characters 集合（原主角自动成为其中一员）+ npcs 集合 + 独立全局 meta。
+    function ensureContainer(agentId) {
+        if (!agentId) return null;
+        const db = getDatabase();
+        let container = db[agentId];
+
+        // legacy 迁移：新键（含 chatId）首次访问时，若旧键（不含 chatId）存在历史记忆，
+        // 整体「移动」到当前聊天存档（迁移后删除旧键），避免升级后记忆丢失或污染。
+        if (!container) {
+            const legacyId = getLegacyAgentId();
+            if (legacyId && legacyId !== agentId && db[legacyId] && (db[legacyId].meta || db[legacyId].characters)) {
+                container = db[legacyId];
+                db[agentId] = container;
+                delete db[legacyId];
+                saveSettings();
+            }
+        }
+
+        // 全新容器：登记原主角（单卡一个 / 群聊多个成员），人人平等
+        if (!container) {
+            container = createContainer();
+            db[agentId] = container;
+            const names = getMainCharacterNameList();
+            for (const nm of names) {
+                const mem = createEmptyMemory();
+                mem.meta.name = nm;
+                container.characters[nm] = mem;
+            }
+            saveSettings();
+            return container;
+        }
+
+        // 旧结构 → 新结构迁移（仅当还没有 characters 集合时执行一次）
+        if (!container.characters || typeof container.characters !== 'object') {
+            const names = getMainCharacterNameList();
+            const characters = {};
+
+            // 1) 原主角：把顶层旧分区字段搬进 characters[原主角名]
+            const mainName = names[0] || getCharName() || '主角';
+            const mainMem = createEmptyMemory();
+            for (const part of PARTITION_KEYS) {
+                if (Array.isArray(container[part]) && container[part].length) {
+                    mainMem[part] = container[part];
+                }
+            }
+            if (container.meta) {
+                mainMem.meta.created_at = container.meta.created_at || Date.now();
+                mainMem.meta.updated_at = container.meta.updated_at || Date.now();
+            }
+            mainMem.meta.name = mainName;
+            characters[mainName] = mainMem;
+
+            // 2) 旧 promoted → characters（升级的主要角色，保持完整结构）
+            if (container.promoted && typeof container.promoted === 'object') {
+                for (const pname in container.promoted) {
+                    const pm = container.promoted[pname];
+                    if (pm && typeof pm === 'object') {
+                        pm.meta = pm.meta || {};
+                        pm.meta.is_promoted = true;
+                        pm.meta.name = pm.meta.name || pname;
+                        characters[pname] = pm;
+                    }
+                }
+            }
+
+            // 3) 全局 meta：保留旧顶层 meta 里的总结进度字段
+            container.meta = {
+                created_at: container.meta?.created_at || Date.now(),
+                updated_at: Date.now(),
+                pendingFloors: container.meta?.pendingFloors || 0,
+                todoCounter: container.meta?.todoCounter || 0,
+                lastSummarizedFloor: container.meta?.lastSummarizedFloor || 0,
+                pendingFlowInjection: !!container.meta?.pendingFlowInjection,
+            };
+
+            container.characters = characters;
+            container.npcs = container.npcs || {};
+
+            // 4) 清理旧顶层分区字段与 promoted，避免双份数据
+            for (const part of PARTITION_KEYS) delete container[part];
+            delete container.promoted;
+            saveSettings();
+        }
+        return container;
+    }
+
+    // 返回「原主角」的记忆对象（第一个主要角色）。
+    // 保持函数名与返回值形态不变（仍是带分区字段的 memory 对象），
+    // 使上层大量 `mem.key_events` / `mem.todos` 直接访问零改动、不破坏既有行为。
+    function getCharacterMemory(agentId) {
+        const container = ensureContainer(agentId);
+        if (!container) return createEmptyMemory();
+        const mainName = getMainCharacterNameList()[0] || getCharName() || '主角';
+        if (!container.characters[mainName]) {
+            container.characters[mainName] = createEmptyMemory();
+            container.characters[mainName].meta.name = mainName;
+            saveSettings();
+        }
+        return container.characters[mainName];
+    }
+
+    // 统一解析目标记忆对象：
+    //   promotedName 非空 → characters 集合中的该主要角色
+    //   npcName 非空 → npcs 集合中的该 NPC
+    //   都为空 → 原主角（第一个主要角色）
     function resolveSubMemory(agentId, npcName = null, promotedName = null) {
-        const mem = getCharacterMemory(agentId);
-        if (promotedName) return mem.promoted?.[promotedName] || null;
-        if (npcName) return mem.npcs?.[npcName] || null;
-        return mem;
+        const container = ensureContainer(agentId);
+        if (!container) return null;
+        if (promotedName) return container.characters?.[promotedName] || null;
+        if (npcName) return container.npcs?.[npcName] || null;
+        return getCharacterMemory(agentId);
     }
 
     function getPartition(agentId, partition, npcName = null, promotedName = null) {
@@ -406,7 +537,7 @@
         } else {
             mem[partition].push(item);
         }
-        getCharacterMemory(agentId).meta.updated_at = Date.now();
+        touchMemory(agentId, mem);
         saveSettings();
     }
 
@@ -444,7 +575,7 @@
                     : { name: String(name).trim(), significance: significance || '' }
             );
         }
-        getCharacterMemory(agentId).meta.updated_at = Date.now();
+        touchMemory(agentId, mem);
         saveSettings();
     }
 
@@ -477,7 +608,7 @@
                     : { content: String(content).trim(), done: done }
             );
         }
-        getCharacterMemory(agentId).meta.updated_at = Date.now();
+        touchMemory(agentId, mem);
         saveSettings();
     }
 
@@ -487,7 +618,7 @@
             return false;
         }
         mem[partition][index] = newItem;
-        getCharacterMemory(agentId).meta.updated_at = Date.now();
+        touchMemory(agentId, mem);
         saveSettings();
         return true;
     }
@@ -498,7 +629,7 @@
             return false;
         }
         mem[partition].splice(index, 1);
-        getCharacterMemory(agentId).meta.updated_at = Date.now();
+        touchMemory(agentId, mem);
         saveSettings();
         return true;
     }
@@ -507,10 +638,18 @@
         const db = getDatabase();
         if (!db[agentId]) return;
         if (partition === null) {
-            db[agentId] = createEmptyMemory();
+            // 清空全部：重建容器，原主角（及群聊成员）重新登记，人人平等
+            const fresh = createContainer();
+            const names = getMainCharacterNameList();
+            for (const nm of names) {
+                const mem = createEmptyMemory();
+                mem.meta.name = nm;
+                fresh.characters[nm] = mem;
+            }
+            db[agentId] = fresh;
         } else {
-            const mem = db[agentId];
-            if (Array.isArray(mem[partition])) mem[partition] = [];
+            const mem = getCharacterMemory(agentId);
+            if (Array.isArray(mem?.[partition])) mem[partition] = [];
         }
         saveSettings();
     }
@@ -526,30 +665,32 @@
         } else {
             todo.done = true;
         }
-        getCharacterMemory(agentId).meta.updated_at = Date.now();
+        touchMemory(agentId, mem);
         saveSettings();
         return true;
     }
 
     function ensureNpcMemory(agentId, npcName, identity = '') {
-        const mem = getCharacterMemory(agentId);
-        if (!mem.npcs[npcName]) {
-            mem.npcs[npcName] = createEmptyMemory();
-            mem.npcs[npcName].meta.is_npc = true;
-            mem.npcs[npcName].meta.name = npcName;
-            mem.npcs[npcName].meta.identity = identity || '';
+        const container = ensureContainer(agentId);
+        if (!container) return null;
+        if (!container.npcs) container.npcs = {};
+        if (!container.npcs[npcName]) {
+            container.npcs[npcName] = createEmptyMemory();
+            container.npcs[npcName].meta.is_npc = true;
+            container.npcs[npcName].meta.name = npcName;
+            container.npcs[npcName].meta.identity = identity || '';
             saveSettings();
-        } else if (identity && !mem.npcs[npcName].meta.identity) {
+        } else if (identity && !container.npcs[npcName].meta.identity) {
             // 补充身份信息
-            mem.npcs[npcName].meta.identity = identity;
+            container.npcs[npcName].meta.identity = identity;
             saveSettings();
         }
-        return mem.npcs[npcName];
+        return container.npcs[npcName];
     }
 
     function listNpcs(agentId) {
-        const mem = getCharacterMemory(agentId);
-        return Object.keys(mem.npcs || {});
+        const container = ensureContainer(agentId);
+        return Object.keys(container?.npcs || {});
     }
 
     // ---------------------------------------------------------------------
@@ -608,29 +749,26 @@
         return count;
     }
 
-    // 判断一个名字是否应视为「主要角色」：
-    // 在角色卡/世界书里出现过，且在正文对话里反复出现（≥ 阈值）→ 主要角色
-    // 否则 → NPC（角色卡里没写，或正文出现频率极低）
-    function isMainCharacter(name, chat) {
+    // 判断一个名字是否应视为「主要角色」——彻底摆脱「角色卡标题」误区：
+    // 1) 已是 characters 集合成员（原主角 / 已升级角色）→ 必然是主要角色（防降级回 NPC）；
+    // 2) 否则按正文「实际高频出现」动态识别：出现次数 ≥ 阈值即视为深度参与剧情的主要角色。
+    function isMainCharacter(name, chat, agentId = null) {
         if (!name) return false;
-        const mainNames = collectMainCharacterNames();
-        // 名字命中主要角色候选（精确匹配，或候选是名字的一部分）
-        const inCardOrWorld = mainNames.some((mn) => {
-            const a = mn.toLowerCase();
-            const b = name.toLowerCase();
-            return a === b || a.includes(b) || b.includes(a);
-        });
-        if (!inCardOrWorld) return false;
-        // 正文里反复出现（默认阈值 2 次，可在 meta 里调整）
-        const freq = countNameFrequency(name, chat);
-        const threshold = 2;
-        return freq >= threshold;
+        // 已是登记在册的主要角色 → 直接命中，杜绝重复建档/降级
+        if (agentId) {
+            const container = ensureContainer(agentId);
+            if (container?.characters?.[name]) return true;
+            // 原主角名（含群聊成员）也视为主要角色
+            if (getMainCharacterNameList().some((n) => n && n.toLowerCase() === String(name).toLowerCase())) return true;
+        }
+        const threshold = Math.max(1, parseInt(getSettings().npcMinMentions, 10) || 3);
+        return countNameFrequency(name, chat) >= threshold;
     }
 
     function removeNpc(agentId, npcName) {
-        const mem = getCharacterMemory(agentId);
-        if (mem.npcs && mem.npcs[npcName]) {
-            delete mem.npcs[npcName];
+        const container = ensureContainer(agentId);
+        if (container?.npcs && container.npcs[npcName]) {
+            delete container.npcs[npcName];
             saveSettings();
             return true;
         }
@@ -638,94 +776,102 @@
     }
 
     // =====================================================================
-    // 多主要角色（promoted）存储层
+    // 多主要角色（characters 集合）存储层
     // =====================================================================
-    // 升级后的主要角色不再合并进原主角，而是拥有独立的完整档案：
-    // db[agentId].promoted[name] = createEmptyMemory()（含全套分区）。
-    // 每个升级角色与原主角地位完全一致，功能齐全、可独立读写持久化。
+    // 所有主要角色（原主角 + 升级角色）统一存放在 characters 同级集合中，
+    // 完全平等、无主次之分、无等级上限。原主角是其中一员（is_promoted=false），
+    // 升级角色 is_promoted=true。每个角色拥有与原主角完全一致的全套功能模块。
 
-    // 列出所有「升级为主要角色」的名字
+    // 列出所有主要角色名（含原主角，完全平等）
+    function listMainCharacters(agentId) {
+        const container = ensureContainer(agentId);
+        if (!container) return [];
+        return Object.keys(container.characters || {});
+    }
+
+    // 列出所有「升级为主要角色」的名字（排除原主角本身）
     function listPromoted(agentId) {
-        const mem = getCharacterMemory(agentId);
-        return Object.keys(mem.promoted || {});
+        const mainNames = new Set(getMainCharacterNameList());
+        return listMainCharacters(agentId).filter((n) => !mainNames.has(n));
     }
 
-    // 获取某个升级主要角色的记忆对象（不存在则返回 null）
+    // 获取某个主要角色的记忆对象（不存在则返回 null）
     function getPromotedMemory(agentId, name) {
-        const mem = getCharacterMemory(agentId);
-        return mem.promoted?.[name] || null;
+        const container = ensureContainer(agentId);
+        return container?.characters?.[name] || null;
     }
 
-    // 确保升级主要角色档案存在（不存在则新建完整空记忆）
+    // 别名：获取任意主要角色（含原主角）的记忆对象
+    function getMainCharacterMemory(agentId, name) {
+        return getPromotedMemory(agentId, name);
+    }
+
+    // 确保主要角色档案存在（不存在则新建完整空记忆）
     function ensurePromotedMemory(agentId, name, identity = '') {
-        const mem = getCharacterMemory(agentId);
-        if (!mem.promoted) mem.promoted = {};
-        if (!mem.promoted[name]) {
-            mem.promoted[name] = createEmptyMemory();
-            mem.promoted[name].meta.is_promoted = true;
-            mem.promoted[name].meta.name = name;
-            mem.promoted[name].meta.identity = identity || '';
+        const container = ensureContainer(agentId);
+        if (!container) return null;
+        if (!container.characters) container.characters = {};
+        if (!container.characters[name]) {
+            container.characters[name] = createEmptyMemory();
+            container.characters[name].meta.is_promoted = true;
+            container.characters[name].meta.name = name;
+            container.characters[name].meta.identity = identity || '';
             saveSettings();
-        } else if (identity && !mem.promoted[name].meta.identity) {
-            mem.promoted[name].meta.identity = identity;
+        } else if (identity && !container.characters[name].meta.identity) {
+            container.characters[name].meta.identity = identity;
             saveSettings();
         }
-        return mem.promoted[name];
+        return container.characters[name];
     }
 
-    // 删除一个升级主要角色档案（不降级回 NPC，直接删除独立窗口）
+    // 删除一个主要角色档案（原主角不可删除；升级角色直接删除独立窗口，不降级回 NPC）
     function removePromoted(agentId, name) {
-        const mem = getCharacterMemory(agentId);
-        if (mem.promoted && mem.promoted[name]) {
-            delete mem.promoted[name];
+        if (getMainCharacterNameList().includes(name)) return false; // 保护原主角
+        const container = ensureContainer(agentId);
+        if (container?.characters && container.characters[name]) {
+            delete container.characters[name];
             saveSettings();
             return true;
         }
         return false;
     }
 
-    // 清空某个升级主要角色的全部记忆（保留档案本身）
+    // 清空某个主要角色的全部记忆（保留档案本身）
     function clearPromotedMemory(agentId, name) {
-        const mem = getCharacterMemory(agentId);
-        if (!mem.promoted || !mem.promoted[name]) return false;
-        mem.promoted[name] = createEmptyMemory();
-        mem.promoted[name].meta.is_promoted = true;
-        mem.promoted[name].meta.name = name;
-        mem.promoted[name].meta.identity = mem.promoted[name].meta.identity || '';
-        mem.meta.updated_at = Date.now();
+        const container = ensureContainer(agentId);
+        if (!container?.characters?.[name]) return false;
+        const identity = container.characters[name].meta?.identity || '';
+        const wasPromoted = !!container.characters[name].meta?.is_promoted;
+        container.characters[name] = createEmptyMemory();
+        container.characters[name].meta.is_promoted = wasPromoted;
+        container.characters[name].meta.name = name;
+        container.characters[name].meta.identity = identity;
+        touchMemory(agentId, container.characters[name]);
         saveSettings();
         return true;
     }
 
-    // NPC 升级为主要角色：把该 NPC 的完整记忆「搬运」为独立主要角色档案（promoted[name]），
-    // 不再合并进原主角。之后该角色拥有与原主角完全一致的全套功能模块（日记本、纪念日、
-    // 情感流转、专属数据等），可独立读写持久化。
+    // NPC 升级为主要角色：把该 NPC 的完整记忆「搬运」进 characters 集合（独立档案），
+    // 不再合并进原主角、也不降级。之后该角色拥有与原主角完全一致的全套功能模块。
     function promoteNpcToMain(agentId, npcName) {
-        const mem = getCharacterMemory(agentId);
-        const npcMem = mem.npcs?.[npcName];
+        const container = ensureContainer(agentId);
+        if (!container) return false;
+        const npcMem = container.npcs?.[npcName];
         if (!npcMem) return false;
 
-        // 建立独立主要角色档案（复用 NPC 已有的完整记忆对象，原地搬运）
-        if (!mem.promoted) mem.promoted = {};
         const target = createEmptyMemory();
         // 拷贝全部分区数据（关键事件/日记/情感流转/待办/物品/纪念日/情绪标签）
-        for (const part of [
-            'key_events', 'character_diary', 'emotion_flow', 'todos',
-            'important_items', 'special_occasions', 'emotional_tags',
-        ]) {
+        for (const part of PARTITION_KEYS) {
             if (Array.isArray(npcMem[part])) target[part] = npcMem[part].slice();
         }
-        // 继承 NPC 的元信息（身份/建档名）
         target.meta.is_promoted = true;
         target.meta.name = npcName;
         target.meta.identity = npcMem?.meta?.identity || '';
         target.meta.created_at = npcMem?.meta?.created_at || Date.now();
         target.meta.updated_at = Date.now();
-        mem.promoted[npcName] = target;
-
-        // 删除原 NPC 档
-        delete mem.npcs[npcName];
-        mem.meta.updated_at = Date.now();
+        container.characters[npcName] = target;
+        delete container.npcs[npcName];
+        touchMemory(agentId, target);
         saveSettings();
         return true;
     }
@@ -735,8 +881,8 @@
     }
 
     function getNpcMemory(agentId, npcName) {
-        const mem = getCharacterMemory(agentId);
-        return mem.npcs?.[npcName] || null;
+        const container = ensureContainer(agentId);
+        return container?.npcs?.[npcName] || null;
     }
 
     function getSettings() {
@@ -797,14 +943,14 @@
             toastr?.warning?.('记忆宫殿：请先选择角色卡');
             return;
         }
-        const mem = getCharacterMemory(agentId);
+        const container = ensureContainer(agentId);
         const payload = {
             plugin: 'memory-palace',
             version: MEMORY_EXPORT_VERSION,
             exported_at: new Date().toISOString(),
             agentId: agentId,
             charName: getCharName(),
-            memory: mem,
+            memory: container,
         };
         const json = JSON.stringify(payload, null, 2);
         const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
@@ -843,6 +989,42 @@
                     'emotional_tags', 'key_events', 'special_occasions',
                     'character_diary', 'emotion_flow', 'todos', 'important_items',
                 ];
+
+                // 兼容两种来源：
+                // 1) 新结构（container：含 characters/npcs/meta）
+                // 2) 旧结构（顶层分区字段 + npcs + promoted）
+                if (mem.characters && typeof mem.characters === 'object') {
+                    // 新结构：直接整体替换主要角色集合与 NPC 集合
+                    const container = ensureContainer(agentId);
+                    const mainNames = getMainCharacterNameList();
+                    for (const name in mem.characters) {
+                        const cm = mem.characters[name];
+                        if (cm && typeof cm === 'object') {
+                            cm.meta = cm.meta || {};
+                            cm.meta.name = cm.meta.name || name;
+                            container.characters[name] = cm;
+                        }
+                    }
+                    // 确保原主角始终在集合中
+                    for (const mn of mainNames) {
+                        if (!container.characters[mn]) {
+                            container.characters[mn] = createEmptyMemory();
+                            container.characters[mn].meta.name = mn;
+                        }
+                    }
+                    if (mem.npcs && typeof mem.npcs === 'object') {
+                        container.npcs = mem.npcs;
+                    }
+                    // meta：保留目标原有的全局 meta（楼层计数、flow 标记等不随导入覆盖）
+                    container.meta = container.meta || {};
+                    container.meta.updated_at = Date.now();
+                    saveSettings();
+                    renderCurrentView();
+                    toastr?.success?.(`记忆宫殿：已导入「${getCharName()}」的记忆（${MEMORY_EXPORT_VERSION}）`);
+                    return;
+                }
+
+                // 旧结构：导入到原主角，NPC 库并入 container.npcs
                 const target = getCharacterMemory(agentId);
                 for (const key of PARTITIONS_KEYS) {
                     if (Array.isArray(mem[key])) {
@@ -851,18 +1033,29 @@
                 }
                 // NPC 库：逐个导入（对象结构，键为 NPC 名）
                 if (mem.npcs && typeof mem.npcs === 'object') {
-                    target.npcs = {};
+                    const container = ensureContainer(agentId);
                     for (const npcName in mem.npcs) {
                         const nm = mem.npcs[npcName];
                         if (nm && typeof nm === 'object') {
-                            target.npcs[npcName] = nm;
+                            container.npcs[npcName] = nm;
                             if (nm.meta && !nm.meta.name) nm.meta.name = npcName;
                         }
                     }
                 }
-                // meta：保留目标原有的 meta（楼层计数、flow 标记等不随导入覆盖）
-                target.meta = target.meta || {};
-                target.meta.updated_at = Date.now();
+                // 旧 promoted → characters（升级的主要角色）
+                if (mem.promoted && typeof mem.promoted === 'object') {
+                    const container = ensureContainer(agentId);
+                    for (const pname in mem.promoted) {
+                        const pm = mem.promoted[pname];
+                        if (pm && typeof pm === 'object') {
+                            pm.meta = pm.meta || {};
+                            pm.meta.is_promoted = true;
+                            pm.meta.name = pm.meta.name || pname;
+                            container.characters[pname] = pm;
+                        }
+                    }
+                }
+                touchMemory(agentId, target);
                 saveSettings();
                 renderCurrentView();
                 toastr?.success?.(`记忆宫殿：已导入「${getCharName()}」的记忆（${MEMORY_EXPORT_VERSION}）`);
@@ -1201,8 +1394,8 @@
             for (const name of data.npc) {
                 const nm = name && name.trim();
                 if (!nm) continue;
-                // 主要角色判定：角色卡/世界书出现 + 正文反复出现 → 跳过，不建 NPC 档
-                if (isMainCharacter(nm, chat)) continue;
+                // 主要角色判定：正文高频互动 / 已登记主要角色 → 跳过，不建 NPC 档（防降级）
+                if (isMainCharacter(nm, chat, agentId)) continue;
                 ensureNpcMemory(agentId, nm);
             }
         }
@@ -1215,8 +1408,8 @@
     // 分区去重检查：date + content 归一化后相同即视为同一条目。
     // 用于总结写入路径，保护「总结失败后重试」场景：已成功批次的数据保留在库中，
     // 重试时同一批次重新总结也不会产生重复的关键事件/日记/情感流转。
-    function partitionHasDuplicate(agentId, partition, npcName, item) {
-        const mem = npcName ? getNpcMemory(agentId, npcName) : getCharacterMemory(agentId);
+    function partitionHasDuplicate(agentId, partition, npcName, promotedName, item) {
+        const mem = resolveSubMemory(agentId, npcName, promotedName);
         const arr = mem?.[partition];
         if (!Array.isArray(arr)) return false;
         const iContent = normalizeStr(item?.content);
@@ -1228,13 +1421,13 @@
     }
 
     // 带去重的写入：同一 date+content 的条目只写一次
-    function addIfNew(agentId, partition, item, npcName = null) {
+    function addIfNew(agentId, partition, item, npcName = null, promotedName = null) {
         if (!item || typeof item !== 'object') {
-            addToPartition(agentId, partition, item, npcName);
+            addToPartition(agentId, partition, item, npcName, promotedName);
             return;
         }
-        if (partitionHasDuplicate(agentId, partition, npcName, item)) return;
-        addToPartition(agentId, partition, item, npcName);
+        if (partitionHasDuplicate(agentId, partition, npcName, promotedName, item)) return;
+        addToPartition(agentId, partition, item, npcName, promotedName);
     }
 
     function applySummaryData(agentId, data) {
@@ -1292,8 +1485,47 @@
         // 重要物品去重（避免同一物品被误判为不同物品重复记录）
         if (Array.isArray(data.important_items)) mergeImportantItems(agentId, data.important_items);
 
-        // NPC：解析 {name, identity, brief} 结构，命名「名字-身份」，记忆简略
-        // 但先做主要角色判定：角色卡/世界书里出现过且正文反复出现的，视作主要角色，不建 NPC 档。
+        // 主要角色动态识别（LLM 按正文高频互动输出）：把深度参与剧情的实体登记为主要角色，
+        // 彻底摆脱「角色卡标题」误区。已在集合中的实体保持不变（防重复、防降级）。
+        if (Array.isArray(data.main_characters)) {
+            const mainNames = new Set(getMainCharacterNameList());
+            for (const mc of data.main_characters) {
+                let mcName = null, identity = '', evidence = '';
+                if (typeof mc === 'string') {
+                    mcName = mc.trim();
+                } else if (mc && typeof mc === 'object') {
+                    mcName = (mc.name || '').trim();
+                    identity = (mc.role || mc.identity || '').trim();
+                    evidence = (mc.evidence || '').trim();
+                }
+                if (!mcName) continue;
+                // 跳过原主角自己（角色卡名 / 群聊成员名）
+                if (mainNames.has(mcName)) continue;
+                // 已是主要角色 → 跳过（防重复建档）
+                if (getMainCharacterMemory(agentId, mcName)) continue;
+
+                // 若该实体当前在 NPC 档里 → 升级为主要角色（搬运，不丢失既有记忆）
+                const npcMem = getNpcMemory(agentId, mcName);
+                if (npcMem) {
+                    promoteNpcToMain(agentId, mcName);
+                    log(`[记忆宫殿] 「${mcName}」由 NPC 升级为主要角色`);
+                } else {
+                    ensurePromotedMemory(agentId, mcName, identity);
+                }
+                // evidence 作为该角色的关键事件留存（去重）
+                if (evidence) {
+                    addIfNew(agentId, 'key_events', {
+                        date: '',
+                        content: evidence,
+                        keywords: [mcName, ...(identity ? [identity] : [])],
+                        emotions: [],
+                    }, null, mcName);
+                }
+            }
+        }
+
+        // NPC：解析 {name, identity, brief} 结构，命名「名字-身份」，记忆简略。
+        // 先做主要角色判定：已是主要角色 / 正文高频互动 → 跳过，不建 NPC 档（防降级、防冗余）。
         if (Array.isArray(data.npc)) {
             const chat = getSTContext()?.chat || [];
             for (const n of data.npc) {
@@ -1309,8 +1541,8 @@
                 }
                 if (!npcName) continue;
 
-                // 主要角色判定：命中角色卡/世界书且正文反复出现 → 跳过（不当作 NPC）
-                if (isMainCharacter(npcName, chat)) {
+                // 主要角色判定：已是登记主要角色 / 正文高频互动 → 跳过（不当作 NPC）
+                if (isMainCharacter(npcName, chat, agentId)) {
                     log(`[记忆宫殿] 「${npcName}」判定为主要角色，跳过 NPC 建档`);
                     continue;
                 }
@@ -1445,11 +1677,12 @@
         }
     }
 
-    // 标记：大总结刚完成，下一轮注入情感流转一次
+    // 标记：大总结刚完成，下一轮注入情感流转一次（全局，非某角色专属）
     function markFlowInjectionPending(agentId) {
-        const mem = getCharacterMemory(agentId);
-        if (!mem.meta) mem.meta = {};
-        mem.meta.pendingFlowInjection = true;
+        const container = ensureContainer(agentId);
+        if (!container) return;
+        if (!container.meta) container.meta = {};
+        container.meta.pendingFlowInjection = true;
         saveSettings();
     }
 
@@ -1534,7 +1767,8 @@
             const coversToEnd = endIdx === chat.length - 1;
             // 仅当总结覆盖到末尾楼层时，推进已总结指针并归档隐藏旧楼层
             if (coversToEnd) {
-                getCharacterMemory(agentId).meta.lastSummarizedFloor = chat.length;
+                const container = ensureContainer(agentId);
+                if (container) container.meta.lastSummarizedFloor = chat.length;
             }
             // 标记：下一轮注入情感流转一次（稳定关系级别）
             markFlowInjectionPending(agentId);
@@ -1567,12 +1801,13 @@
 
     async function checkTodos(agentId, recentText) {
         const settings = getSettings();
+        const container = ensureContainer(agentId);
         const mem = getCharacterMemory(agentId);
-        mem.meta.todoCounter = (mem.meta.todoCounter || 0) + 1;
-        if (mem.meta.todoCounter < settings.todoCheckInterval) {
+        container.meta.todoCounter = (container.meta.todoCounter || 0) + 1;
+        if (container.meta.todoCounter < settings.todoCheckInterval) {
             return null;
         }
-        mem.meta.todoCounter = 0;
+        container.meta.todoCounter = 0;
 
         const prompt = getPrompt('todo_extract');
         const system = fillTemplate(prompt.system, { char: getCharName(), chunk: recentText });
@@ -1673,7 +1908,7 @@
     }
 
     function buildInjectionPrompt(agentId, userText) {
-        const mem = getCharacterMemory(agentId);
+        const container = ensureContainer(agentId);
         const parts = [];
         const text = String(userText || '');
 
@@ -1682,78 +1917,71 @@
         };
         const itemText = (it) => (typeof it === 'string' ? it : (it?.content ?? it?.name ?? ''));
 
-        // ============ 一、全量记忆概览（始终注入，确保 AI 每次都能读到记忆） ============
-        // 关键事件：取最近 N 条（避免上下文过长），始终让 AI 掌握角色经历
-        const events = mem.key_events || [];
-        if (events.length) {
-            const recentEvents = events.slice(-8);
-            const eventText = recentEvents.map((ev) => {
-                if (typeof ev === 'string') return ev;
-                const kw = (ev.keywords || []).join('/');
-                const em = (ev.emotions || []).join('/');
-                const dt = ev.date ? `[${ev.date}]` : '';
-                const tag = [dt, kw, em].filter(Boolean).join(' · ');
-                return tag ? `${ev.content}（${tag}）` : ev.content;
-            }).filter(Boolean).join('；');
-            push('关键事件（最近）', eventText);
-        }
+        // ============ 一、多主角并行注入（完全平等） ============
+        // 遍历 characters 集合中所有主要角色（含原主角），每个角色的记忆、日记、情感状态
+        // 独立、实时、平等地注入，让大模型清晰感知「当前剧情存在多个主要角色」。
+        const mainNames = new Set(getMainCharacterNameList());
+        const allCharacters = listMainCharacters(agentId);
 
-        // 待办/约定（未完成）
-        const pendingTodos = (mem.todos || []).filter((t) => !(t && t.done));
-        if (pendingTodos.length) {
-            push('待办/约定', pendingTodos.map(itemText).filter(Boolean).join('；'));
-        }
+        // 原主角（当前角色）排最前，其余主要角色按登记顺序随后，地位完全平等
+        const ordered = [...allCharacters].sort((a, b) => {
+            const aSelf = mainNames.has(a) ? 0 : 1;
+            const bSelf = mainNames.has(b) ? 0 : 1;
+            return aSelf - bSelf;
+        });
 
-        // 重要物品
-        const items = mem.important_items || [];
-        if (items.length) {
-            const itemText2 = items.map((it) => {
-                if (typeof it === 'string') return it;
-                return it.significance ? `${it.name}（${it.significance}）` : it.name;
-            }).filter(Boolean).join('；');
-            push('重要物品', itemText2);
-        }
-
-        // 情绪标签（当前角色的情绪基调）
-        const tags = mem.emotional_tags || [];
-        if (tags.length) {
-            push('情绪标签', tags.filter(Boolean).join('、'));
-        }
-
-        // 情感流转：最近一条（始终注入，稳定关系级别）
-        const flows = mem.emotion_flow || [];
-        if (flows.length) {
-            const latest = flows[flows.length - 1];
-            if (typeof latest === 'object') {
-                const flowParts = [];
-                if (latest.date) flowParts.push(`阶段：${latest.date}`);
-                if (latest.content) flowParts.push(latest.content);
-                if (latest.affection) flowParts.push(`好感度：${latest.affection}`);
-                if (latest.relationship) flowParts.push(`关系定位：${latest.relationship}`);
-                if (flowParts.length) {
-                    push('当前情感状态', flowParts.join('；'));
+        // 单个主要角色记忆 → 一段文字（含关键事件/待办/情感/纪念日/物品）
+        const formatRoleMemory = (name, rm, isSelf) => {
+            const rParts = [];
+            const rEvents = rm.key_events || [];
+            if (rEvents.length) {
+                const evText = rEvents.slice(-6).map((ev) => {
+                    if (typeof ev === 'string') return ev;
+                    const dt = ev.date ? `[${ev.date}]` : '';
+                    const kw = (ev.keywords || []).join('/');
+                    const em = (ev.emotions || []).join('/');
+                    const tag = [dt, kw, em].filter(Boolean).join('·');
+                    return tag ? `${ev.content}（${tag}）` : ev.content;
+                }).filter(Boolean).join('；');
+                if (evText) rParts.push(`关键事件：${evText}`);
+            }
+            const rTodos = (rm.todos || []).filter((t) => !(t && t.done));
+            if (rTodos.length) {
+                rParts.push(`待办：${rTodos.map((t) => (typeof t === 'string' ? t : t.content)).filter(Boolean).join('；')}`);
+            }
+            const rFlows = rm.emotion_flow || [];
+            if (rFlows.length) {
+                const latest = rFlows[rFlows.length - 1];
+                if (typeof latest === 'object' && (latest.content || latest.affection || latest.relationship)) {
+                    const fp = [];
+                    if (latest.content) fp.push(latest.content);
+                    if (latest.affection) fp.push(`好感度：${latest.affection}`);
+                    if (latest.relationship) fp.push(`关系定位：${latest.relationship}`);
+                    if (fp.length) rParts.push(`情感状态：${fp.join('；')}`);
                 }
             }
+            const rOccasions = rm.special_occasions || [];
+            if (rOccasions.length) rParts.push(`纪念日：${rOccasions.filter(Boolean).join('、')}`);
+            const rItems = rm.important_items || [];
+            if (rItems.length) {
+                rParts.push(`重要物品：${rItems.map((it) => (typeof it === 'string' ? it : (it.significance ? `${it.name}（${it.significance}）` : it.name))).filter(Boolean).join('；')}`);
+            }
+            if (!rParts.length) return '';
+            const identity = rm?.meta?.identity || '';
+            const label = isSelf
+                ? `我（${name}）`
+                : (identity ? `${name}（${identity}）` : name);
+            return `【主要角色·${label}】${rParts.join('；')}`;
+        };
+
+        for (const name of ordered) {
+            const rm = getMainCharacterMemory(agentId, name);
+            if (!rm) continue;
+            const seg = formatRoleMemory(name, rm, mainNames.has(name));
+            if (seg) parts.push(seg);
         }
 
-        // 特殊节日/纪念日
-        const occasions = mem.special_occasions || [];
-        if (occasions.length) {
-            push('特殊节日/纪念日', occasions.filter(Boolean).join('、'));
-        }
-
-        // NPC 名录：始终附上 NPC 名字-身份清单，让 AI 知道有哪些相关人物
-        const npcNames = Object.keys(mem.npcs || {});
-        if (npcNames.length) {
-            const npcList = npcNames.map((n) => {
-                const idn = mem.npcs[n]?.meta?.identity || '';
-                return idn ? `${n}（${idn}）` : n;
-            }).join('、');
-            push('相关 NPC', npcList);
-        }
-
-        // ============ 二、检索式召回（命中关键词/情绪/日期时补充细节） ============
-        // 关键事件：命中关键词/情绪的事件（补充细节）
+        // ============ 二、检索式召回（命中关键词/情绪/日期时补充细节，针对当前角色） ============
         const relevant = retrieveRelevantEvents(agentId, userText);
         if (relevant.length) {
             const eventText = relevant.map((ev) => {
@@ -1775,9 +2003,17 @@
             push('纪念日记忆', diaryText);
         }
 
-        // NPC：命中 NPC 名字或身份关键词时，补充该 NPC 的简略记忆
+        // ============ 三、NPC 名录 + 命中 NPC 简略记忆 ============
+        const npcNames = Object.keys(container?.npcs || {});
+        if (npcNames.length) {
+            const npcList = npcNames.map((n) => {
+                const idn = container.npcs[n]?.meta?.identity || '';
+                return idn ? `${n}（${idn}）` : n;
+            }).join('、');
+            push('相关 NPC', npcList);
+        }
         for (const npcName of npcNames) {
-            const npcMem = mem.npcs[npcName];
+            const npcMem = container.npcs[npcName];
             const identity = npcMem?.meta?.identity || '';
             const nameTokens = npcName.split(/[-—–_·\s]/).filter(Boolean);
             const triggerTokens = [...nameTokens, identity].filter(Boolean);
@@ -1798,47 +2034,18 @@
             }
         }
 
-        // ============ 升级主要角色：始终注入其核心记忆（与原主角同等地位，参与互动） ============
-        const promotedNames = listPromoted(agentId);
-        for (const pname of promotedNames) {
-            const pm = getPromotedMemory(agentId, pname);
-            if (!pm) continue;
-            const pParts = [];
-            const pEvents = pm.key_events || [];
-            if (pEvents.length) {
-                const evText = pEvents.slice(-6).map((ev) => {
-                    if (typeof ev === 'string') return ev;
-                    const dt = ev.date ? `[${ev.date}]` : '';
-                    return dt ? `${ev.content}（${dt}）` : ev.content;
-                }).filter(Boolean).join('；');
-                if (evText) pParts.push(`关键事件：${evText}`);
-            }
-            const pTodos = (pm.todos || []).filter((t) => !(t && t.done));
-            if (pTodos.length) {
-                pParts.push(`待办：${pTodos.map((t) => (typeof t === 'string' ? t : t.content)).filter(Boolean).join('；')}`);
-            }
-            const pFlows = pm.emotion_flow || [];
-            if (pFlows.length) {
-                const latest = pFlows[pFlows.length - 1];
-                if (typeof latest === 'object' && latest.content) {
-                    pParts.push(`关系：${latest.content}${latest.affection ? '（好感度：' + latest.affection + '）' : ''}`);
-                }
-            }
-            const identity = pm?.meta?.identity || '';
-            if (pParts.length) {
-                const label = identity ? `${pname}（${identity}）` : pname;
-                push(`【主要角色·${label}】记忆`, pParts.join('；'));
-            }
-        }
-
-        // ============ 三、清理一次性标记 ============
-        if (mem.meta && mem.meta.pendingFlowInjection === true) {
-            mem.meta.pendingFlowInjection = false;
+        // ============ 四、清理一次性标记（全局） ============
+        if (container?.meta?.pendingFlowInjection === true) {
+            container.meta.pendingFlowInjection = false;
             saveSettings();
         }
 
         if (!parts.length) return '';
-        return `\n\n[以下是你（${getCharName()}）的长期记忆，请自然融入你的回答，不要直接复述这些文字]\n${parts.join('\n')}`;
+        const roleCount = ordered.length;
+        const header = roleCount > 1
+            ? `[以下为本剧情中全部 ${roleCount} 个主要角色的长期记忆。当前剧情存在多个主要角色，各自记忆、日记、情感状态相互独立且实时更新，请分别代入对应角色视角，切勿混淆各角色的经历与关系。]`
+            : `[以下是「${getCharName()}」的长期记忆，请自然融入回答，不要直接复述这些文字]`;
+        return `\n\n${header}\n${parts.join('\n')}`;
     }
 
     // 检查是否该自动总结（基于楼层计数）。返回 true 表示已触发。
@@ -1855,8 +2062,8 @@
         const chat = context?.chat || [];
         if (!chat.length) return false;
 
-        const mem = getCharacterMemory(agentId);
-        const lastSummarized = mem.meta.lastSummarizedFloor || 0;
+        const container = ensureContainer(agentId);
+        const lastSummarized = container.meta.lastSummarizedFloor || 0;
 
         // 尚未总结的新楼层数（聊天总楼层 - 已总结到的楼层）
         const newFloorCount = chat.length - lastSummarized;
@@ -1879,7 +2086,7 @@
                 _autoSummarizing = false;
                 // 只有真正产出记忆才推进已总结楼层指针；否则保留，下次重试
                 if (result && (Array.isArray(result) ? result.length > 0 : true)) {
-                    mem.meta.lastSummarizedFloor = chat.length;
+                    container.meta.lastSummarizedFloor = chat.length;
                     markFlowInjectionPending(agentId);
                     saveSettings();
                     try {
@@ -2144,7 +2351,7 @@
         <div id="ltm-panel-overlay"></div>
         <aside id="ltm-panel-drawer">
             <div class="ltm-drawer-head">
-                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v2.7.0</span></div>
+                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v3.0.0</span></div>
                 <button class="ltm-drawer-close" id="ltm-panel-close"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="ltm-nav-tabs" id="ltm-nav-tabs">
@@ -2368,43 +2575,48 @@
             return '<div class="ltm-empty">尚未选择角色卡，请先在酒馆中打开一个角色。</div>';
         }
 
-        const groupNames = getGroupCharNames();
-        const chars = groupNames.length > 1 ? groupNames : [getCharName()];
+        const mainNames = new Set(getMainCharacterNameList());
+        const allCharacters = listMainCharacters(agentId);
 
-        // 当前主角卡（原主角）
-        const charCards = chars.map((name) => {
-            return `<div class="ltm-char-card" data-char="${esc(name)}">
-                <div class="ltm-char-icon"><i class="fa-solid fa-user-ninja"></i></div>
-                <div class="ltm-char-name">${esc(name)}</div>
+        // 所有主要角色（含原主角）统一渲染为平等卡片；原主角排最前
+        const ordered = [...allCharacters].sort((a, b) => {
+            const aSelf = mainNames.has(a) ? 0 : 1;
+            const bSelf = mainNames.has(b) ? 0 : 1;
+            return aSelf - bSelf;
+        });
+
+        const charCards = ordered.map((name) => {
+            const isSelf = mainNames.has(name);
+            const mem = getMainCharacterMemory(agentId, name);
+            const identity = mem?.meta?.identity || '';
+            const label = identity ? `${name} · ${identity}` : name;
+            const icon = isSelf ? 'fa-user-ninja' : 'fa-crown';
+            const badge = isSelf
+                ? '<div class="ltm-role-tag" style="font-size:0.7em;color:var(--ltm-accent);margin-top:2px;">当前角色</div>'
+                : '<div class="ltm-role-tag" style="font-size:0.7em;color:var(--ltm-gold);margin-top:2px;">主要角色</div>';
+            const delBtn = isSelf
+                ? ''
+                : `<button class="ltm-card-delete" data-act="del-promoted" data-promoted="${esc(name)}" title="删除该主要角色独立档案"><i class="fa-solid fa-trash"></i></button>`;
+            return `<div class="ltm-char-card" data-promoted="${esc(name)}">
+                <div class="ltm-char-icon"><i class="fa-solid ${icon}"></i></div>
+                <div class="ltm-char-name">${esc(label)}</div>
+                ${badge}
+                ${delBtn}
             </div>`;
         }).join('');
 
-        // 升级为主要角色的独立档案列表
-        const promotedNames = listPromoted(agentId);
-        const promotedCards = promotedNames.length
-            ? promotedNames.map((name) => {
-                const pm = getPromotedMemory(agentId, name);
-                const identity = pm?.meta?.identity || '';
-                const label = identity ? `${name} · ${identity}` : name;
-                return `<div class="ltm-char-card" data-promoted="${esc(name)}">
-                    <div class="ltm-char-icon"><i class="fa-solid fa-crown"></i></div>
-                    <div class="ltm-char-name">${esc(label)}</div>
-                    <button class="ltm-card-delete" data-act="del-promoted" data-promoted="${esc(name)}" title="删除该主要角色独立档案"><i class="fa-solid fa-trash"></i></button>
-                </div>`;
-            }).join('')
-            : '<div class="ltm-empty">（暂无升级的主要角色。可在 NPC 栏把 NPC 升级为主要角色。）</div>';
+        const promoteHint = mainNames.size > 1
+            ? '当前为群聊，多位角色卡成员均为主要角色，地位完全平等。'
+            : '所有主要角色地位平等、功能一致，独立存储互不干扰。可在 NPC 栏把 NPC 升级为主要角色。';
 
         return `
         <div class="ltm-view ltm-active">
             <div class="ltm-card">
                 <div class="ltm-card-title">
-                    <span class="ltm-title-left"><i class="fa-solid fa-users"></i> 选择角色</span>
+                    <span class="ltm-title-left"><i class="fa-solid fa-users"></i> 主要角色（完全平等）</span>
                 </div>
-                <div class="ltm-sub-title"><i class="fa-solid fa-user-ninja"></i> 当前主角</div>
                 <div class="ltm-grid">${charCards}</div>
-                <div class="ltm-sub-title" style="margin-top:14px;"><i class="fa-solid fa-crown"></i> 升级的主要角色（独立窗口）</div>
-                <div class="ltm-grid">${promotedCards}</div>
-                <p class="ltm-hint"><i class="fa-solid fa-circle-info"></i> 点击角色查看并编辑其记忆。升级的主要角色拥有与原主角完全一致的全套功能，独立存储、互不干扰。</p>
+                <p class="ltm-hint"><i class="fa-solid fa-circle-info"></i> ${promoteHint} 点击任意主要角色查看并编辑其完整档案。</p>
             </div>
             <div id="ltm-memory-detail"></div>
         </div>`;
@@ -2425,15 +2637,16 @@
         </div>`;
     }
 
-    // 升级主要角色的独立详情窗口（与原主角详情结构一致，全套分区）
+    // 主要角色的独立详情窗口（原主角与升级角色共用，全套分区，功能一致）
     function renderPromotedDetail(agentId, name) {
         currentNpc = null;
         currentPromoted = name;
         currentPart = 'key_events';
+        const isSelf = getMainCharacterNameList().includes(name);
         return `
         <div class="ltm-card">
             <div class="ltm-card-title">
-                <span class="ltm-title-left"><i class="fa-solid fa-crown"></i> 「${esc(name)}」主要角色档案</span>
+                <span class="ltm-title-left"><i class="fa-solid ${isSelf ? 'fa-user-ninja' : 'fa-crown'}"></i> 「${esc(name)}」${isSelf ? '当前角色档案' : '主要角色档案'}</span>
                 <button class="ltm-btn ltm-btn-danger ltm-btn-sm" data-act="clear-promoted" data-promoted="${esc(name)}">清空全部</button>
             </div>
             ${renderPartitionTabs()}
@@ -2627,7 +2840,7 @@
                 <div class="ltm-char-card" data-npc="${esc(n)}">
                     <div class="ltm-char-icon"><i class="fa-solid fa-user-secret"></i></div>
                     <div class="ltm-char-name">${esc(label)}</div>
-                    <button class="ltm-card-delete" data-act="promote-npc" data-npc="${esc(n)}" title="升级为主要角色（打包移动到主角记忆库）"><i class="fa-solid fa-arrow-up"></i></button>
+                    <button class="ltm-card-delete" data-act="promote-npc" data-npc="${esc(n)}" title="升级为主要角色（生成独立平等窗口）"><i class="fa-solid fa-arrow-up"></i></button>
                     <button class="ltm-card-delete" data-act="del-npc" data-npc="${esc(n)}" title="删除建档"><i class="fa-solid fa-trash"></i></button>
                 </div>`;
             }).join('')
@@ -2934,19 +3147,36 @@
                         renderCurrentView();
                     }
                     break;
-                case 'clear-promoted':
-                    if (confirm(`确定清空主要角色「${promoted}」的全部记忆吗？此操作不可恢复。`)) {
+                case 'clear-promoted': {
+                    const isSelf = getMainCharacterNameList().includes(promoted);
+                    if (isSelf) {
+                        if (confirm(`确定清空当前角色「${promoted}」的全部记忆吗？此操作不可恢复。`)) {
+                            const mem = getCharacterMemory(agentId);
+                            for (const part of PARTITION_KEYS) {
+                                if (Array.isArray(mem[part])) mem[part] = [];
+                            }
+                            touchMemory(agentId, mem);
+                            saveSettings();
+                            renderCurrentView();
+                        }
+                    } else if (confirm(`确定清空主要角色「${promoted}」的全部记忆吗？此操作不可恢复。`)) {
                         clearPromotedMemory(agentId, promoted);
                         renderCurrentView();
                     }
                     break;
-                case 'del-promoted':
+                }
+                case 'del-promoted': {
+                    if (getMainCharacterNameList().includes(promoted)) {
+                        toastr?.warning?.(`记忆宫殿：「${promoted}」是当前角色卡，属于固定主要角色，不可删除`);
+                        break;
+                    }
                     if (confirm(`确定删除主要角色「${promoted}」的独立档案吗？其全部记忆将被移除。`)) {
                         removePromoted(agentId, promoted);
                         currentPromoted = null;
                         renderCurrentView();
                     }
                     break;
+                }
                 case 'del-npc':
                     if (confirm(`确定删除 NPC「${npc}」的独立记忆库吗？`)) {
                         removeNpc(agentId, npc);
@@ -3437,11 +3667,15 @@
         listNpcs,
         removeNpc,
         promoteNpcToMain,
+        listMainCharacters,
         listPromoted,
         getPromotedMemory,
+        getMainCharacterMemory,
         ensurePromotedMemory,
         removePromoted,
         clearPromotedMemory,
+        ensureContainer,
+        getMainCharacterNameList,
         getNpcMemory,
         getAllPrompts,
         savePrompt,
