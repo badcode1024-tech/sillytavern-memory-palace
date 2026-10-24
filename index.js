@@ -3905,70 +3905,200 @@
     // =============================================================
     // 插件入口（事件绑定 + 注入逻辑）
     // =============================================================
-    let pendingInjection = '';
+    // 参考 fate-sandbox 的健壮注入设计：官方 setExtensionPrompt 主方案 + 事件钩子多层兜底。
+    // 旧实现问题（见文末「问题复盘」）：只挂一个事件 + 依赖 pendingInjection 缓存变量（async 竞态）+
+    // 只改 chat.push（末尾、无防重复、无兜底通道）+ init 一次性注册（过早可能挂不上）。
+    // 新实现：实时组装（不依赖缓存）+ 多层兜底（chat unshift → system_prompt → full_prompt）+
+    // 防重复 + 同时监听两个事件 + 延时循环注册。
 
+    const EXT_PROMPT_KEY = 'ltm-memory-injection';
+    let _injectionRegistered = false;
+
+    // 从 eventData 提取当前用户消息文本（兼容 chat 数组两种消息形态）
+    function extractCurrentUserText(eventData) {
+        const chat = eventData?.chat;
+        if (!Array.isArray(chat)) return '';
+        // 从末尾往前找第一条 user 消息
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const m = chat[i];
+            if (!m) continue;
+            // chat-completion 模式：role === 'user'
+            if (m.role === 'user' && typeof m.content === 'string' && m.content.trim()) {
+                return m.content;
+            }
+            // text-completion 兼容：is_user === true（mes 或 content 字段）
+            if (m.is_user === true) {
+                if (typeof m.mes === 'string' && m.mes.trim()) return m.mes;
+                if (typeof m.content === 'string' && m.content.trim()) return m.content;
+            }
+        }
+        return '';
+    }
+
+    // 主方案：官方 setExtensionPrompt —— 注入极简「主要角色名录 + 待办」作为固定背景保险。
+    // 即使事件钩子全部失败，这一层也能保证角色名录进入上下文（提示词查看器 100% 可见）。
+    function registerExtensionPromptBackground() {
+        try {
+            const ctx = getSTContext();
+            if (!ctx || typeof ctx.setExtensionPrompt !== 'function') return false;
+            const settings = getSettings();
+            if (!settings.enabled || !settings.injectPrompt) {
+                ctx.setExtensionPrompt(EXT_PROMPT_KEY, '', 0, 0);
+                return true;
+            }
+            const agentId = getAgentId();
+            if (!agentId) {
+                ctx.setExtensionPrompt(EXT_PROMPT_KEY, '', 0, 0);
+                return false;
+            }
+            // 极简概要：主要角色名录 + 各自未完成待办（不与事件钩子的完整检索内容重复）
+            const names = listMainCharacters(agentId);
+            if (!names.length) {
+                ctx.setExtensionPrompt(EXT_PROMPT_KEY, '', 0, 0);
+                return true;
+            }
+            const lines = [];
+            for (const name of names) {
+                const rm = getMainCharacterMemory(agentId, name);
+                if (!rm) continue;
+                const identity = rm.meta?.identity || '';
+                const label = identity ? `${name}（${identity}）` : name;
+                const todos = (rm.todos || []).filter((t) => !(t && t.done));
+                const todoText = todos.map((t) => (typeof t === 'string' ? t : t.content)).filter(Boolean).join('；');
+                lines.push(todoText ? `- ${label}（待办：${todoText}）` : `- ${label}`);
+            }
+            const text = lines.length ? `[记忆宫殿·主要角色名录]\n${lines.join('\n')}` : '';
+            ctx.setExtensionPrompt(EXT_PROMPT_KEY, text, 0, 0);
+            return true;
+        } catch (e) {
+            console.warn('[记忆宫殿] setExtensionPrompt 挂载异常：', e);
+            return false;
+        }
+    }
+
+    // 兜底/动态层：事件钩子 —— 实时组装完整记忆（含 userText 命中检索），多层兜底注入。
+    function injectMemory(eventData) {
+        const settings = getSettings();
+        if (!settings.enabled || !settings.injectPrompt) return;
+        const agentId = getAgentId();
+        if (!agentId) return;
+
+        // 每轮先刷新官方扩展提示词（主方案保险层）
+        registerExtensionPromptBackground();
+
+        // 实时组装完整记忆（不依赖 pendingInjection 缓存，彻底消除 async 竞态）
+        const userText = extractCurrentUserText(eventData);
+        let injection = '';
+        try {
+            injection = buildInjectionPrompt(agentId, userText);
+        } catch (e) {
+            console.warn('[记忆宫殿] 记忆组装失败：', e);
+            return;
+        }
+        if (!injection) {
+            console.log('[记忆宫殿] 本轮未组装到记忆（记忆库为空或未命中），跳过动态注入');
+            return;
+        }
+
+        // 固定标识前缀：用于防重复 filter 匹配（buildInjectionPrompt 输出本身不以固定串开头）
+        const INJECT_TAG = '[记忆宫殿·注入记忆]';
+        const tagged = `${INJECT_TAG}\n${injection}`;
+
+        // 兜底 1：eventData.chat 数组 → unshift 到顶部（带防重复）
+        if (Array.isArray(eventData.chat)) {
+            // 防重复：先移除旧的注入消息，避免流式/重试时重复堆积
+            eventData.chat = eventData.chat.filter(
+                (m) => !(m && typeof m.content === 'string' && m.content.startsWith(INJECT_TAG))
+            );
+            eventData.chat.unshift({
+                role: 'system',
+                content: tagged,
+                is_system: true,
+                force_avatar: false,
+            });
+            console.log('[记忆宫殿] ✅ 记忆已通过 eventData.chat 注入（长度 ' + injection.length + ' 字符）');
+            return;
+        }
+        // 兜底 2：eventData.system_prompt 字符串 → 拼接顶部
+        if (typeof eventData.system_prompt === 'string') {
+            eventData.system_prompt = `${tagged}\n\n${eventData.system_prompt}`;
+            console.log('[记忆宫殿] ✅ 记忆已通过 system_prompt 注入');
+            return;
+        }
+        // 兜底 3：eventData.full_prompt 字符串 → 拼接顶部
+        if (typeof eventData.full_prompt === 'string') {
+            eventData.full_prompt = `${tagged}\n\n${eventData.full_prompt}`;
+            console.log('[记忆宫殿] ✅ 记忆已通过 full_prompt 注入');
+            return;
+        }
+        console.warn('[记忆宫殿] ❌ 注入失败：eventData 无 chat/system_prompt/full_prompt 可用通道');
+    }
+
+    // 发消息时触发自动总结检测（注入由 CHAT_COMPLETION_PROMPT_READY 事件实时完成，
+    // 不再在此预组装 pendingInjection，消除 async 竞态）。
     async function onMessageSent() {
         const settings = getSettings();
         if (!settings.enabled) return;
         const agentId = getAgentId();
-        if (!agentId) {
-            console.warn('[记忆宫殿] 注入跳过：未识别当前角色（agentId 为空）');
-            return;
-        }
-
-        const context = getSTContext();
-        const chat = context?.chat || [];
-        const lastUser = [...chat].reverse().find((m) => m.is_user);
-        if (!lastUser) {
-            console.warn('[记忆宫殿] 注入跳过：未找到最近一条用户消息');
-            return;
-        }
-
+        if (!agentId) return;
         try {
-            pendingInjection = await processUserMessage(String(lastUser.mes));
-            // 调试日志：每次发消息都打印，确认记忆是否成功组装
-            if (pendingInjection) {
-                console.log('[记忆宫殿] ✅ 记忆已组装，长度 ' + pendingInjection.length + ' 字符，待注入上下文：');
-                console.log('[记忆宫殿] ' + pendingInjection);
-            } else {
-                console.log('[记忆宫殿] ⚠️ 本轮未组装到任何记忆（可能记忆库为空，或当前消息未命中任何条目）。角色：' + getCharName());
-            }
-        } catch (err) {
-            console.warn('[LTM] 记忆处理失败：', err);
-            pendingInjection = '';
+            maybeAutoSummarize();
+        } catch (e) {
+            console.warn('[记忆宫殿] 自动总结触发异常：', e);
         }
     }
 
-    function injectPrompt(eventData) {
-        const settings = getSettings();
-        if (!settings.enabled) return;
-        if (!settings.injectPrompt) {
-            console.log('[记忆宫殿] 注入开关已关闭（injectPrompt=false），跳过注入');
-            return;
-        }
-        if (!pendingInjection) {
-            console.log('[记忆宫殿] 无待注入记忆（pendingInjection 为空），跳过');
-            return;
-        }
+    // 注册：官方 Extension Prompt 主方案 + 兜底事件钩子（同时监听多事件，兼容主流酒馆版本）
+    function registerContextInjection() {
+        try {
+            const ctx = getSTContext();
+            if (!ctx) return false;
 
-        const injection = pendingInjection;
-        pendingInjection = '';
+            // 主方案：官方 setExtensionPrompt（只要 API 存在即标记就位）
+            const hasExtPrompt = typeof ctx.setExtensionPrompt === 'function';
+            if (hasExtPrompt) {
+                registerExtensionPromptBackground();
+            }
 
-        const chat = eventData?.chat;
-        if (!Array.isArray(chat)) {
-            console.warn('[记忆宫殿] ❌ 注入失败：CHAT_COMPLETION_PROMPT_READY 事件的 chat 不是数组');
-            return;
+            // 兜底：事件钩子（同时监听两个事件，兼容不同酒馆版本/后端模式）
+            const eventSource = ctx.eventSource;
+            const event_types = ctx.event_types;
+            if (eventSource && event_types) {
+                if (event_types.CHAT_COMPLETION_PROMPT_READY) {
+                    eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, injectMemory);
+                }
+                if (event_types.BEFORE_COMPLETION) {
+                    eventSource.on(event_types.BEFORE_COMPLETION, injectMemory);
+                }
+            }
+
+            if (hasExtPrompt || (eventSource && event_types)) {
+                _injectionRegistered = true;
+                console.log(
+                    '[记忆宫殿] 上下文注入监听器已就位',
+                    hasExtPrompt ? '（setExtensionPrompt 主方案）' : '（事件钩子兜底方案）'
+                );
+                return true;
+            }
+            return false;
+        } catch (e) {
+            console.warn('[记忆宫殿] 上下文注入监听器注册失败：', e);
+            return false;
         }
+    }
 
-        // 就地 push 一条 system 消息，SillyTavern 随后会把该数组序列化发给大模型
-        chat.push({
-            role: 'system',
-            content: injection,
-            is_system: true,
-            force_avatar: false,
-        });
-        console.log('[记忆宫殿] ✅ 记忆已注入到发送给大模型的上下文（chat 数组长度 ' + chat.length + '）。注入内容：');
-        console.log('[记忆宫殿] ' + injection);
+    // 延时/循环注册：防止初始化过早（酒馆上下文未就绪），反复确认监听器已挂载。
+    function ensureContextInjection() {
+        let attempts = 0;
+        const tryRegister = () => {
+            if (_injectionRegistered) return;
+            const ok = registerContextInjection();
+            if (!ok && attempts < 30) {
+                attempts++;
+                setTimeout(tryRegister, 500); // 每 500ms 重试，最多 15 秒
+            }
+        };
+        tryRegister();
     }
 
     function buildSettingsHtml() {
@@ -4037,12 +4167,14 @@
         // 悬浮球管理面板
         mountPanelShell();
 
-        // 事件绑定
+        // 注入逻辑：延时循环注册（防止初始化过早导致监听器挂不上）
+        // 内部已同时监听 CHAT_COMPLETION_PROMPT_READY + BEFORE_COMPLETION，
+        // 并挂官方 setExtensionPrompt 主方案。
+        ensureContextInjection();
+
+        // 发消息时触发自动总结检测（注入由 injectMemory 实时完成）
         if (eventSource && event_types?.MESSAGE_SENT) {
             eventSource.on(event_types.MESSAGE_SENT, onMessageSent);
-        }
-        if (eventSource && event_types?.CHAT_COMPLETION_PROMPT_READY) {
-            eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, injectPrompt);
         }
         if (eventSource && event_types?.CHAT_CHANGED) {
             // 切换聊天（含新对话/分支）时：重置编辑状态并刷新面板。
@@ -4051,7 +4183,8 @@
                 currentNpc = null;
                 currentPromoted = null;
                 currentPart = 'key_events';
-                pendingInjection = '';
+                _injectionRegistered = false; // 切换聊天后重新注册注入监听器
+                ensureContextInjection();
                 renderCurrentView();
             });
         }
@@ -4149,5 +4282,12 @@
         findNpcNodeKey,
         buildExistingCharactersText,
         listMainCharacters,
+        // 注入逻辑（供测试/调试）
+        injectMemory,
+        registerExtensionPromptBackground,
+        registerContextInjection,
+        ensureContextInjection,
+        extractCurrentUserText,
+        EXT_PROMPT_KEY,
     };
 })(typeof window !== 'undefined' ? window : globalThis);
