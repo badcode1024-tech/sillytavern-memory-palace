@@ -72,57 +72,49 @@
         // 例如 startFloor=26, endFloor=48 表示只总结第 26~48 层（含两端）。
         summaryStartFloor: '',
         summaryEndFloor: '',
-        // 主题配色 key：'default' | 'theme2' | 'theme3'
-        theme: 'default',
+        // 皮肤风格 key：'a03' | 'glass' | 'macaron' | 'fantasy'（夜间模式另由 data-ltm-mode 独立控制）
+        theme: 'a03',
     };
 
-    // 三组主题配色（重点色 / 底色 / 辅助色）
-    const THEMES = {
-        default: {
-            name: '默认（暗红·米白）',
-            accent: '#8c1c1c',   // 重点色
-            accentDark: '#5e1010',
-            accentDeep: '#b23a2a',
-            gold: '#c9a86a',
-            bg: '#f6f1e6',       // 底色
-            bg2: '#efe6d3',
-            aux: '#8795a5',      // 辅助色（用于文字次要色）
-            text: '#3a2f2a',
+    // ===== 四套全新皮肤风格 =====
+    // 具体视觉全部由 style.css 以 html[data-ltm-style][data-ltm-mode] 选择器实现；
+    // 这里的色值仅作元数据 +「注入式兜底样式」的 CSS 变量默认值，
+    // 保证极端情况下（style.css 未加载）面板依旧可用、可观。
+    const STYLES = {
+        a03: {
+            name: '极简红白（AO3）',
+            desc: '档案美学 · 纯白扁平',
+            accent: '#990000', accentDark: '#6b0000', accentDeep: '#c14444',
+            gold: '#990000', bg: '#ffffff', bg2: '#f6f6f6', aux: '#8a8a8a', text: '#1a1a1a',
         },
-        theme2: {
-            name: '配色二（蓝灰·米白）',
-            accent: '#70b0cc',
-            accentDark: '#4d8aac',
-            accentDeep: '#c96a4a',
-            gold: '#70b0cc',
-            bg: '#e9e3ce',
-            bg2: '#ddd5bf',
-            aux: '#8795a5',
-            text: '#3a2f2a',
+        glass: {
+            name: '高科液态玻璃（FUI）',
+            desc: '液态毛玻璃 · 科幻 HUD',
+            accent: '#22d3ee', accentDark: '#0e7490', accentDeep: '#7cffcb',
+            gold: '#7cffcb', bg: '#eef7fb', bg2: '#d6ebf4', aux: '#5c7d8b', text: '#0b2b38',
         },
-        theme3: {
-            name: '配色三（暖黄·奶白）',
-            accent: '#f7df7b',
-            accentDark: '#d9b94c',
-            accentDeep: '#c98a4a',
-            gold: '#f7df7b',
-            bg: '#fefce5',
-            bg2: '#f7f2d0',
-            aux: '#6d9dce',
-            text: '#3a2f2a',
+        macaron: {
+            name: '可爱风（马卡龙）',
+            desc: '大圆角 · 分栏撞色',
+            accent: '#8ad6ae', accentDark: '#4f8f74', accentDeep: '#e78ea6',
+            gold: '#ffcf6b', bg: '#fdf8f3', bg2: '#f4eee8', aux: '#a89a93', text: '#4a3f3a',
         },
-        dark: {
-            name: '夜间模式（深色）',
-            dark: true,           // 标记为深色主题，触发 data-theme-dark 覆盖
-            accent: '#9b5cff',     // 夜间用紫色点缀
-            accentDark: '#2a1a3e',
-            accentDeep: '#b47aff',
-            gold: '#c9a86a',
-            bg: '#1e1e26',         // 深色底
-            bg2: '#272733',
-            aux: '#8a8a9a',
-            text: '#e8e6f0',
+        fantasy: {
+            name: '西幻复古（魔法书）',
+            desc: '羊皮纸 · 描金藤蔓',
+            accent: '#8a6a2f', accentDark: '#5c4416', accentDeep: '#b8944a',
+            gold: '#c8a44d', bg: '#f0e2c4', bg2: '#e3d0a8', aux: '#8a7550', text: '#3d2c14',
         },
+    };
+
+    // 兼容别名：旧代码 / 外部引用 window.LTM.THEMES 依然可用
+    const THEMES = STYLES;
+
+    // 旧主题 key → 新风格 key 的迁移映射（含旧版「夜间模式」主题）
+    const LEGACY_STYLE_MAP = {
+        default: 'a03', theme1: 'a03',
+        theme2: 'glass', theme3: 'macaron',
+        dark: 'fantasy',
     };
 
     // ---------------------------------------------------------------------
@@ -1092,32 +1084,100 @@
         saveSettings();
     }
 
-    // 获取当前主题配置（带兜底）
-    function getTheme() {
-        const key = getSettings().theme || 'default';
-        return THEMES[key] || THEMES.default;
+    // =====================================================================
+    // UI 皮肤与夜间模式（LocalStorage 记忆，刷新不丢失）
+    // =====================================================================
+    const UI_PREFS_KEY = 'ltm_ui_prefs';   // { style: 'a03'|'glass'|'macaron'|'fantasy', mode: 'light'|'dark' }
+    let _uiStyle = 'a03';
+    let _uiMode = 'light';
+
+    // 读取本地 UI 偏好（皮肤 + 夜间模式）
+    function readUiPrefs() {
+        try {
+            if (global.localStorage) {
+                const raw = localStorage.getItem(UI_PREFS_KEY);
+                if (raw) return JSON.parse(raw) || {};
+            }
+        } catch (e) { /* ignore */ }
+        return {};
     }
 
-    // 应用主题：把主题色写入 CSS 变量（挂到 :root，供面板所有元素引用）
-    function applyTheme(key) {
-        if (!key || !THEMES[key]) key = 'default';
-        setSetting('theme', key);
-        const t = THEMES[key];
-        const root = document.documentElement;
-        root.style.setProperty('--ltm-accent', t.accent);
-        root.style.setProperty('--ltm-accent-dark', t.accentDark);
-        root.style.setProperty('--ltm-accent-deep', t.accentDeep);
-        root.style.setProperty('--ltm-gold', t.gold);
-        root.style.setProperty('--ltm-bg', t.bg);
-        root.style.setProperty('--ltm-bg2', t.bg2);
-        root.style.setProperty('--ltm-aux', t.aux);
-        root.style.setProperty('--ltm-text', t.text);
-        // 夜间模式标记：给抽屉加 data-theme-dark 属性，供 CSS 做深色专用覆盖
+    // 写入本地 UI 偏好
+    function writeUiPrefs() {
+        try {
+            if (global.localStorage) {
+                localStorage.setItem(UI_PREFS_KEY, JSON.stringify({ style: _uiStyle, mode: _uiMode }));
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    // 旧主题 key → 新风格 key 归一化（兼容升级前的存档）
+    function normalizeStyleKey(key) {
+        if (key && STYLES[key]) return key;
+        if (key && LEGACY_STYLE_MAP[key]) return LEGACY_STYLE_MAP[key];
+        return 'a03';
+    }
+
+    // 获取当前风格元数据（带兜底）
+    function getTheme() {
+        return STYLES[_uiStyle] || STYLES.a03;
+    }
+
+    function getUiStyle() { return _uiStyle; }
+    function getUiMode() { return _uiMode; }
+
+    // 把皮肤/夜间状态同步到 DOM（<html> 与抽屉），并刷新兜底 CSS 变量
+    function syncThemeAttrs() {
+        const t = getTheme();
+        const html = document.documentElement;
+        if (html) {
+            html.setAttribute('data-ltm-style', _uiStyle);
+            html.setAttribute('data-ltm-mode', _uiMode);
+            html.style.setProperty('--ltm-accent', t.accent);
+            html.style.setProperty('--ltm-accent-dark', t.accentDark);
+            html.style.setProperty('--ltm-accent-deep', t.accentDeep);
+            html.style.setProperty('--ltm-gold', t.gold);
+            html.style.setProperty('--ltm-bg', t.bg);
+            html.style.setProperty('--ltm-bg2', t.bg2);
+            html.style.setProperty('--ltm-aux', t.aux);
+            html.style.setProperty('--ltm-text', t.text);
+        }
         const drawer = document.getElementById('ltm-panel-drawer');
         if (drawer) {
-            if (t.dark) drawer.setAttribute('data-theme-dark', '1');
-            else drawer.removeAttribute('data-theme-dark');
+            drawer.setAttribute('data-ltm-style', _uiStyle);
+            drawer.setAttribute('data-ltm-mode', _uiMode);
         }
+    }
+
+    // 应用皮肤风格（保留原函数名与签名，外部调用/旧代码不受影响）
+    function applyTheme(key) {
+        _uiStyle = normalizeStyleKey(key);
+        setSetting('theme', _uiStyle);
+        writeUiPrefs();
+        syncThemeAttrs();
+    }
+
+    // 设置夜间模式：mode = 'light' | 'dark'
+    function setMode(mode) {
+        _uiMode = (mode === 'dark') ? 'dark' : 'light';
+        writeUiPrefs();
+        syncThemeAttrs();
+        updateModeToggleIcon();
+    }
+
+    // 一键切换夜间模式
+    function toggleMode() {
+        setMode(_uiMode === 'dark' ? 'light' : 'dark');
+    }
+
+    // 夜间按钮图标随状态切换（日/月）
+    function updateModeToggleIcon() {
+        const btn = document.getElementById('ltm-mode-toggle');
+        if (!btn) return;
+        const icon = btn.querySelector('i');
+        if (icon) icon.className = _uiMode === 'dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
+        btn.setAttribute('title', _uiMode === 'dark' ? '切换日间模式' : '切换夜间模式');
+        btn.setAttribute('aria-pressed', _uiMode === 'dark' ? 'true' : 'false');
     }
 
     // ---------------------------------------------------------------------
@@ -2707,7 +2767,13 @@
 #ltm-panel-overlay.ltm-open{opacity:1;pointer-events:auto;}
 #ltm-panel-drawer{position:fixed;top:0;right:0;bottom:0;width:460px;max-width:92vw;height:100vh;height:100dvh;z-index:30002;background-color:var(--ltm-bg);background-image:linear-gradient(160deg,var(--ltm-bg),var(--ltm-bg2));border-left:1px solid rgba(140,28,28,.25);box-shadow:-6px 0 24px rgba(0,0,0,.25);transform:translateX(105%);transition:transform .3s cubic-bezier(.22,1,.36,1);display:flex;flex-direction:column;color:var(--ltm-text);box-sizing:border-box;overflow:hidden;font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;max-height:100vh;max-height:100dvh;}
 #ltm-panel-drawer.ltm-open{transform:translateX(0);}
-.ltm-drawer-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:linear-gradient(120deg,var(--ltm-accent-dark),var(--ltm-accent));border-bottom:1px solid rgba(255,255,255,.15);color:var(--ltm-bg);flex-shrink:0;min-height:52px;}
+.ltm-drawer-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;background:linear-gradient(120deg,var(--ltm-accent-dark),var(--ltm-accent));border-bottom:1px solid rgba(255,255,255,.15);color:var(--ltm-bg);flex-shrink:0;min-height:52px;}
+.ltm-head-actions{display:flex;align-items:center;gap:8px;flex-shrink:0;}
+.ltm-ver{font-size:.7em;font-weight:400;opacity:.75;}
+.ltm-mode-toggle{background:none;border:1px solid rgba(255,255,255,.3);border-radius:50%;width:30px;height:30px;color:var(--ltm-bg);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .2s ease,transform .2s ease;flex-shrink:0;}
+.ltm-mode-toggle:hover{background:rgba(255,255,255,.15);}
+.ltm-mode-toggle:active{transform:scale(.94);}
+.ltm-theme-desc{font-style:normal;font-size:.72em;opacity:.6;margin-left:6px;}
 .ltm-drawer-logo{font-weight:700;font-size:1.15rem;letter-spacing:.06em;display:flex;align-items:center;gap:8px;}
 .ltm-drawer-logo i{color:var(--ltm-gold);}
 .ltm-drawer-close{background:none;border:1px solid rgba(255,255,255,.3);border-radius:50%;width:30px;height:30px;color:var(--ltm-bg);cursor:pointer;display:flex;align-items:center;justify-content:center;}
@@ -2809,23 +2875,11 @@
     .ltm-drawer-close{width:40px;height:40px;font-size:1.15rem;flex-shrink:0;}
     .ltm-nav-tabs{padding-left:calc(16px + env(safe-area-inset-left,0px));padding-right:calc(16px + env(safe-area-inset-right,0px));}
 }
-/* ===== 夜间模式（深色）专用覆盖：修正硬编码浅色元素在深底下的可读性 ===== */
-#ltm-panel-drawer[data-theme-dark] .ltm-char-card,
-#ltm-panel-drawer[data-theme-dark] .ltm-item-card{background:rgba(255,255,255,.08);border-color:rgba(156,92,255,.35);}
-#ltm-panel-drawer[data-theme-dark] .ltm-card-title{border-bottom-color:rgba(156,92,255,.3);}
-#ltm-panel-drawer[data-theme-dark] .ltm-pill{background:rgba(255,255,255,.08);border-color:rgba(156,92,255,.3);}
-#ltm-panel-drawer[data-theme-dark] .ltm-pill.ltm-active{background:var(--ltm-accent);color:#fff;}
-#ltm-panel-drawer[data-theme-dark] .ltm-input,
-#ltm-panel-drawer[data-theme-dark] .ltm-textarea{background:#2c2c38;color:#f0eef8;border-color:#4a4a5a;}
-#ltm-panel-drawer[data-theme-dark] .ltm-input:focus,
-#ltm-panel-drawer[data-theme-dark] .ltm-textarea:focus{background:#323240;border-color:var(--ltm-accent);box-shadow:0 0 0 3px rgba(156,92,255,.18);}
-#ltm-panel-drawer[data-theme-dark] .ltm-hint{color:#cfc9e0;background:rgba(156,92,255,.12);border-color:rgba(156,92,255,.3);}
-#ltm-panel-drawer[data-theme-dark] .ltm-meta-val{color:#e0dbf0;border-bottom-color:rgba(156,92,255,.25);}
-#ltm-panel-drawer[data-theme-dark] .ltm-item-desc{color:#b5b0c8;}
-#ltm-panel-drawer[data-theme-dark] .ltm-tag{color:#e8e0f5;background:rgba(156,92,255,.18);border-color:rgba(156,92,255,.4);}
-#ltm-panel-drawer[data-theme-dark] .ltm-nav-tabs{background:rgba(255,255,255,.04);border-bottom-color:rgba(156,92,255,.25);}
-#ltm-panel-drawer[data-theme-dark] .ltm-item{border-bottom-color:rgba(156,92,255,.15);}
-#ltm-panel-drawer[data-theme-dark] .ltm-done .ltm-item-text{color:#8a84a0;}
+/* ===== 夜间模式（深色）与四种皮肤风格 =====
+   注意：这里只保留「中性兜底」基础结构，避免 style.css 缺失时面板不可用。
+   全部皮肤视觉（含日/夜两态）统一在 style.css 中以
+   html[data-ltm-style="…"][data-ltm-mode="…"] #ltm-panel-drawer … 高特异性选择器实现，
+   因此无论如何加载顺序 / 覆盖，皮肤样式都会稳定生效。 */
         `;
         document.head.appendChild(style);
     }
@@ -2845,8 +2899,11 @@
         <div id="ltm-panel-overlay"></div>
         <aside id="ltm-panel-drawer">
             <div class="ltm-drawer-head">
-                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span style="font-size:0.7em;font-weight:400;opacity:.75;">v3.1.0</span></div>
-                <button class="ltm-drawer-close" id="ltm-panel-close"><i class="fa-solid fa-xmark"></i></button>
+                <div class="ltm-drawer-logo"><i class="fa-solid fa-landmark"></i> 记忆宫殿 <span class="ltm-ver">v4.0.0</span></div>
+                <div class="ltm-head-actions">
+                    <button class="ltm-mode-toggle" id="ltm-mode-toggle" title="切换夜间模式" aria-pressed="false"><i class="fa-solid fa-moon"></i></button>
+                    <button class="ltm-drawer-close" id="ltm-panel-close" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button>
+                </div>
             </div>
             <div class="ltm-nav-tabs" id="ltm-nav-tabs">
                 <button class="ltm-nav-tab ltm-active" data-view="memory"><i class="fa-solid fa-landmark"></i> 记忆宫殿</button>
@@ -2860,6 +2917,10 @@
         `;
         document.body.appendChild(shell);
 
+        // 皮肤 / 夜间模式状态落到抽屉元素上（mountPanelShell 之前 applyTheme 时抽屉尚不存在）
+        syncThemeAttrs();
+        updateModeToggleIcon();
+
         bindFabDrag();
         bindShellEvents();
     }
@@ -2870,6 +2931,9 @@
 
         fab.addEventListener('click', openPanel);
         document.getElementById('ltm-panel-close').addEventListener('click', closePanel);
+        // 夜间模式切换（紧邻关闭按钮左侧，全皮肤统一位置）
+        const modeBtn = document.getElementById('ltm-mode-toggle');
+        if (modeBtn) modeBtn.addEventListener('click', toggleMode);
         overlay.addEventListener('click', closePanel);
 
         document.getElementById('ltm-nav-tabs').addEventListener('click', (e) => {
@@ -3046,12 +3110,18 @@
         document.querySelectorAll('#ltm-nav-tabs .ltm-nav-tab').forEach((t) => {
             t.classList.toggle('ltm-active', t.dataset.view === view);
         });
+        // 供「可爱风」等按分栏配色的皮肤使用（各视图独立撞色）
+        const drawer = document.getElementById('ltm-panel-drawer');
+        if (drawer) drawer.setAttribute('data-ltm-view', view);
         renderCurrentView();
     }
 
     function renderCurrentView() {
         const body = document.getElementById('ltm-drawer-body');
         if (!body) return;
+        // 同步当前视图标记（供可爱风等按分栏配色的皮肤使用）
+        const _dr = document.getElementById('ltm-panel-drawer');
+        if (_dr) _dr.setAttribute('data-ltm-view', currentView);
         switch (currentView) {
             case 'memory': body.innerHTML = renderMemoryView(); break;
             case 'npc': body.innerHTML = renderNpcView(); break;
@@ -3492,18 +3562,18 @@
 
             <div class="ltm-card ltm-collapsible" data-collapse="theme">
                 <div class="ltm-card-title ltm-collapse-head" data-collapse-toggle="theme">
-                    <span class="ltm-title-left"><i class="fa-solid fa-palette"></i> 皮肤颜色与主题设置</span>
+                    <span class="ltm-title-left"><i class="fa-solid fa-palette"></i> 皮肤风格与夜间模式</span>
                     <i class="fa-solid fa-chevron-down ltm-collapse-caret"></i>
                 </div>
                 <div class="ltm-collapse-body">
-                    <p class="ltm-hint" style="margin-top:0;"><i class="fa-solid fa-circle-info"></i> 点击圆形色块切换面板主题色，支持夜间模式。</p>
-                    ${Object.keys(THEMES).map((key) => {
-                        const t = THEMES[key];
-                        const active = (s.theme || 'default') === key ? 'ltm-active' : '';
+                    <p class="ltm-hint" style="margin-top:0;"><i class="fa-solid fa-circle-info"></i> 点击色块切换面板皮肤风格；夜间模式切换按钮在标题栏「关闭」按钮左侧，四种皮肤均支持日/夜两态。</p>
+                    ${Object.keys(STYLES).map((key) => {
+                        const t = STYLES[key];
+                        const active = (s.theme || 'a03') === key ? 'ltm-active' : '';
                         return `
                         <div class="ltm-theme-row">
-                            <div class="ltm-theme-dot ${active}" data-act="set-theme" data-theme="${key}" title="${esc(t.name)}" style="background:linear-gradient(135deg,${t.accent},${t.bg});"></div>
-                            <span class="ltm-theme-name">${esc(t.name)}</span>
+                            <div class="ltm-theme-dot ${active}" data-act="set-theme" data-theme="${key}" title="${esc(t.name)}" style="background:linear-gradient(135deg,${t.accent},${t.bg2});"></div>
+                            <span class="ltm-theme-name">${esc(t.name)}<em class="ltm-theme-desc">${esc(t.desc || '')}</em></span>
                         </div>`;
                     }).join('')}
                 </div>
@@ -4331,8 +4401,12 @@
 
     function init() {
         getSettings();
-        // 应用已保存的主题配色
-        applyTheme(getSettings().theme);
+        // 皮肤与夜间模式：优先 LocalStorage，其次插件设置，最后默认（刷新不丢失）
+        const _prefs = readUiPrefs();
+        _uiStyle = normalizeStyleKey(_prefs.style || getSettings().theme);
+        _uiMode = (_prefs.mode === 'dark') ? 'dark' : 'light';
+        writeUiPrefs();
+        syncThemeAttrs();
 
         const context = getSTContext();
         const eventSource = context?.eventSource;
@@ -4447,6 +4521,11 @@
         applyTheme,
         getTheme,
         THEMES,
+        STYLES,
+        setMode,
+        toggleMode,
+        getUiStyle,
+        getUiMode,
         collectMainCharacterNames,
         isMainCharacter,
         refreshPanel: renderCurrentView,

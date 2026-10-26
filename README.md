@@ -2,7 +2,7 @@
 
 给 SillyTavern（酒馆）接入真正的**长期记忆**——一个**纯前端插件**，无需任何外部后端或额外 Python 依赖，本地酒馆与云酒馆（Docker / Serv00 / 宝塔等）完美通用。
 
-> 当前版本：**v3.5.0**
+> 当前版本：**v4.0.0**
 
 ---
 
@@ -90,7 +90,9 @@ SillyTavern 前端插件（纯 JS，单文件自包含）
 sillytavern-long-term-memory/
 ├── manifest.json   # 插件清单（GitHub 一键安装入口，author: badcode1024-tech）
 ├── index.js        # 单文件自包含（记忆引擎 + 数据层 + 提示词 + LLM + 面板）
-├── style.css       # 样式（暗红/米白 + 响应式）
+├── style.css       # 四套皮肤样式系统（极简红白 / 液态玻璃 / 可爱风 / 西幻复古，各含日/夜两态）
+├── assets/
+│   └── bg-fantasy.png  # 「西幻复古」皮肤的羊皮纸做旧背景
 ├── LICENSE         # MIT
 └── README.md
 ```
