@@ -2323,6 +2323,108 @@
         return matched;
     }
 
+    // 单个主要角色记忆 → 一段文字（含关键事件/待办/情感/纪念日/物品）
+    // 抽取为顶层函数，供 buildInjectionPrompt（事件钩子动态层）和
+    // registerExtensionPromptBackground（官方扩展提示词主方案）共用，确保两边输出格式一致。
+    function formatRoleMemoryForInjection(name, rm, isSelf) {
+        if (!rm) return '';
+        const rParts = [];
+        const rEvents = rm.key_events || [];
+        if (rEvents.length) {
+            const evText = rEvents.slice(-6).map((ev) => {
+                if (typeof ev === 'string') return ev;
+                const dt = ev.date ? `[${ev.date}]` : '';
+                const kw = (ev.keywords || []).join('/');
+                const em = (ev.emotions || []).join('/');
+                const tag = [dt, kw, em].filter(Boolean).join('·');
+                return tag ? `${ev.content}（${tag}）` : ev.content;
+            }).filter(Boolean).join('；');
+            if (evText) rParts.push(`关键事件：${evText}`);
+        }
+        const rTodos = (rm.todos || []).filter((t) => !(t && t.done));
+        if (rTodos.length) {
+            rParts.push(`待办：${rTodos.map((t) => (typeof t === 'string' ? t : t.content)).filter(Boolean).join('；')}`);
+        }
+        const rFlows = rm.emotion_flow || [];
+        if (rFlows.length) {
+            const latest = rFlows[rFlows.length - 1];
+            if (typeof latest === 'object' && (latest.content || latest.affection || latest.relationship)) {
+                const fp = [];
+                if (latest.content) fp.push(latest.content);
+                if (latest.affection) fp.push(`好感度：${latest.affection}`);
+                if (latest.relationship) fp.push(`关系定位：${latest.relationship}`);
+                if (fp.length) rParts.push(`情感状态：${fp.join('；')}`);
+            }
+        }
+        const rOccasions = rm.special_occasions || [];
+        if (rOccasions.length) rParts.push(`纪念日：${rOccasions.filter(Boolean).join('、')}`);
+        const rItems = rm.important_items || [];
+        if (rItems.length) {
+            rParts.push(`重要物品：${rItems.map((it) => (typeof it === 'string' ? it : (it.significance ? `${it.name}（${it.significance}）` : it.name))).filter(Boolean).join('；')}`);
+        }
+        if (!rParts.length) return '';
+        const identity = rm?.meta?.identity || '';
+        const label = isSelf
+            ? `我（${name}）`
+            : (identity ? `${name}（${identity}）` : name);
+        return `【主要角色·${label}】${rParts.join('；')}`;
+    }
+
+    // 单个 NPC 记忆 → 一段简略文字（含身份 + 最近 3 条关键事件）
+    function formatNpcMemoryForInjection(name, nm, full = false) {
+        if (!nm) return '';
+        const parts = [];
+        const identity = nm?.meta?.identity || '';
+        const label = identity ? `${name}（${identity}）` : name;
+        const events = nm.key_events || [];
+        if (events.length) {
+            const brief = (full ? events : events.slice(-3))
+                .map((e) => (typeof e === 'object' ? e.content : e))
+                .filter(Boolean)
+                .join('；');
+            if (brief) parts.push(`关键事件：${brief}`);
+        }
+        const todos = (nm.todos || []).filter((t) => !(t && t.done));
+        if (todos.length) {
+            parts.push(`待办：${todos.map((t) => (typeof t === 'string' ? t : t.content)).filter(Boolean).join('；')}`);
+        }
+        const flows = nm.emotion_flow || [];
+        if (flows.length) {
+            const latest = flows[flows.length - 1];
+            if (latest && typeof latest === 'object' && (latest.relationship || latest.affection)) {
+                const fp = [];
+                if (latest.relationship) fp.push(`关系定位：${latest.relationship}`);
+                if (latest.affection) fp.push(`好感度：${latest.affection}`);
+                if (fp.length) parts.push(`情感状态：${fp.join('；')}`);
+            }
+        }
+        if (!parts.length) return '';
+        return `【NPC·${label}】${parts.join('；')}`;
+    }
+
+    // 汇总所有主要角色的「重要物品」→ 独立段落，让大模型清晰感知物品库全貌
+    function buildImportantItemsText(agentId) {
+        const names = listMainCharacters(agentId);
+        const lines = [];
+        for (const name of names) {
+            const rm = getMainCharacterMemory(agentId, name);
+            const items = rm?.important_items || [];
+            if (!items.length) continue;
+            const ownerLabel = rm?.meta?.identity ? `${name}（${rm.meta.identity}）` : name;
+            const itemLines = items.map((it) => {
+                if (typeof it === 'string') return `- ${it}（持有者：${ownerLabel}）`;
+                const sig = it.significance ? `（${it.significance}）` : '';
+                return `- ${it.name || ''}${sig}（持有者：${ownerLabel}）`;
+            }).filter((l) => l.trim() !== '-' && l.trim() !== '- （持有者：' + ownerLabel + '）');
+            lines.push(...itemLines);
+        }
+        return lines.length ? lines.join('\n') : '';
+    }
+
+    // 综合组装（全量主要角色 + 检索召回 + NPC 命中）。
+    // 注意：此函数已不参与主注入链路 —— 主方案 registerExtensionPromptBackground
+    // 负责全量主要角色 / NPC / 物品库；兜底层 injectMemory 用 buildRetrievalOnlyPrompt
+    // 只发检索召回。本函数仅保留给调试 / 测试 / 外部按钮调用。
     function buildInjectionPrompt(agentId, userText) {
         const container = ensureContainer(agentId);
         const parts = [];
@@ -2346,54 +2448,10 @@
             return aSelf - bSelf;
         });
 
-        // 单个主要角色记忆 → 一段文字（含关键事件/待办/情感/纪念日/物品）
-        const formatRoleMemory = (name, rm, isSelf) => {
-            const rParts = [];
-            const rEvents = rm.key_events || [];
-            if (rEvents.length) {
-                const evText = rEvents.slice(-6).map((ev) => {
-                    if (typeof ev === 'string') return ev;
-                    const dt = ev.date ? `[${ev.date}]` : '';
-                    const kw = (ev.keywords || []).join('/');
-                    const em = (ev.emotions || []).join('/');
-                    const tag = [dt, kw, em].filter(Boolean).join('·');
-                    return tag ? `${ev.content}（${tag}）` : ev.content;
-                }).filter(Boolean).join('；');
-                if (evText) rParts.push(`关键事件：${evText}`);
-            }
-            const rTodos = (rm.todos || []).filter((t) => !(t && t.done));
-            if (rTodos.length) {
-                rParts.push(`待办：${rTodos.map((t) => (typeof t === 'string' ? t : t.content)).filter(Boolean).join('；')}`);
-            }
-            const rFlows = rm.emotion_flow || [];
-            if (rFlows.length) {
-                const latest = rFlows[rFlows.length - 1];
-                if (typeof latest === 'object' && (latest.content || latest.affection || latest.relationship)) {
-                    const fp = [];
-                    if (latest.content) fp.push(latest.content);
-                    if (latest.affection) fp.push(`好感度：${latest.affection}`);
-                    if (latest.relationship) fp.push(`关系定位：${latest.relationship}`);
-                    if (fp.length) rParts.push(`情感状态：${fp.join('；')}`);
-                }
-            }
-            const rOccasions = rm.special_occasions || [];
-            if (rOccasions.length) rParts.push(`纪念日：${rOccasions.filter(Boolean).join('、')}`);
-            const rItems = rm.important_items || [];
-            if (rItems.length) {
-                rParts.push(`重要物品：${rItems.map((it) => (typeof it === 'string' ? it : (it.significance ? `${it.name}（${it.significance}）` : it.name))).filter(Boolean).join('；')}`);
-            }
-            if (!rParts.length) return '';
-            const identity = rm?.meta?.identity || '';
-            const label = isSelf
-                ? `我（${name}）`
-                : (identity ? `${name}（${identity}）` : name);
-            return `【主要角色·${label}】${rParts.join('；')}`;
-        };
-
         for (const name of ordered) {
             const rm = getMainCharacterMemory(agentId, name);
             if (!rm) continue;
-            const seg = formatRoleMemory(name, rm, mainNames.has(name));
+            const seg = formatRoleMemoryForInjection(name, rm, mainNames.has(name));
             if (seg) parts.push(seg);
         }
 
@@ -2539,8 +2597,9 @@
         return true;
     }
 
-    // 核心入口：每次用户发消息时调用。只负责「判断是否该总结」+「检索注入」，
-    // 不再每层提取。
+    // 核心入口（保留供手动按钮/外部 API 调用）：刷新主方案扩展提示词，
+    // 并返回「按 userText 检索召回」的补充内容。主方案已通过 setExtensionPrompt
+    // 稳定注入全部模块（主要角色 / NPC / 物品库），故这里只返回召回补充。
     async function processUserMessage(userText) {
         const settings = getSettings();
         if (!settings.enabled) return '';
@@ -2551,8 +2610,11 @@
         // 自动总结检测（到达阈值自动触发）
         maybeAutoSummarize();
 
-        // 检索命中并注入（仅命中关键词/情绪的关键事件）
-        return buildInjectionPrompt(agentId, userText);
+        // 先刷新主方案（全量模块稳定注入提示词查看器）
+        registerExtensionPromptBackground();
+
+        // 仅返回检索召回补充内容（不重复主方案已发送的全量段）
+        return buildRetrievalOnlyPrompt(agentId, userText);
     }
 
     // =============================================================
@@ -3935,8 +3997,13 @@
         return '';
     }
 
-    // 主方案：官方 setExtensionPrompt —— 注入极简「主要角色名录 + 待办」作为固定背景保险。
-    // 即使事件钩子全部失败，这一层也能保证角色名录进入上下文（提示词查看器 100% 可见）。
+    // 主方案：官方 setExtensionPrompt —— 把「主要角色全量记忆 + NPC 全量名录 + 重要物品库」
+    // 全部通过 EXT_PROMPT_KEY 通道注入。SillyTavern 会自动把该 key 的内容包成
+    // role: 'system' 消息发给大模型（提示词查看器 100% 可见）。
+    //
+    // 旧实现只发「名录+待办」导致用户在提示词查看器里只看到待办事项、其他记忆全消失
+    // （事件钩子层 injectMemory 在部分酒馆配置/后端模式下根本不触发）。
+    // 现按「待办事项所走的通道」把所有模块都走 setExtensionPrompt 一次稳定注入。
     function registerExtensionPromptBackground() {
         try {
             const ctx = getSTContext();
@@ -3951,23 +4018,77 @@
                 ctx.setExtensionPrompt(EXT_PROMPT_KEY, '', 0, 0);
                 return false;
             }
-            // 极简概要：主要角色名录 + 各自未完成待办（不与事件钩子的完整检索内容重复）
+
+            const container = ensureContainer(agentId);
+            const mainNames = new Set(getMainCharacterNameList());
             const names = listMainCharacters(agentId);
-            if (!names.length) {
+            const npcNames = Object.keys(container?.npcs || {});
+            if (!names.length && !npcNames.length) {
                 ctx.setExtensionPrompt(EXT_PROMPT_KEY, '', 0, 0);
                 return true;
             }
-            const lines = [];
-            for (const name of names) {
+
+            // 原主角（当前角色卡）排最前，其余主要角色按登记顺序随后，地位完全平等
+            const ordered = [...names].sort((a, b) => {
+                const aSelf = mainNames.has(a) ? 0 : 1;
+                const bSelf = mainNames.has(b) ? 0 : 1;
+                return aSelf - bSelf;
+            });
+
+            const blocks = [];
+
+            // ============ 模块一：主要角色全量记忆 ============
+            // 每个角色一段：关键事件 / 待办 / 情感状态 / 纪念日 / 重要物品
+            const roleSegs = [];
+            for (const name of ordered) {
                 const rm = getMainCharacterMemory(agentId, name);
                 if (!rm) continue;
-                const identity = rm.meta?.identity || '';
-                const label = identity ? `${name}（${identity}）` : name;
-                const todos = (rm.todos || []).filter((t) => !(t && t.done));
-                const todoText = todos.map((t) => (typeof t === 'string' ? t : t.content)).filter(Boolean).join('；');
-                lines.push(todoText ? `- ${label}（待办：${todoText}）` : `- ${label}`);
+                const seg = formatRoleMemoryForInjection(name, rm, mainNames.has(name));
+                if (seg) roleSegs.push(seg);
             }
-            const text = lines.length ? `[记忆宫殿·主要角色名录]\n${lines.join('\n')}` : '';
+            if (roleSegs.length) {
+                const roleCount = ordered.length;
+                const head = roleCount > 1
+                    ? `[记忆宫殿·主要角色记忆（共 ${roleCount} 个主要角色，各自记忆相互独立且平等、实时更新；请分别代入对应角色视角，切勿混淆经历与关系）]`
+                    : `[记忆宫殿·主要角色记忆]`;
+                blocks.push(`${head}\n${roleSegs.join('\n')}`);
+            }
+
+            // ============ 模块二：NPC 全量名录 + 关键事件 ============
+            // 有事件的 NPC 输出详情段；空 NPC（无事件但仍在档案里）也列入名录，
+            // 让大模型清楚感知所有已建档 NPC 的存在（即使尚未积累事件）。
+            const npcSegs = [];
+            const npcListLines = [];
+            for (const npcName of npcNames) {
+                const nm = container.npcs[npcName];
+                if (!nm) continue;
+                const seg = formatNpcMemoryForInjection(npcName, nm, false);
+                if (seg) {
+                    npcSegs.push(seg);
+                }
+                // 不论有无事件，都把名字 + 身份加入名录行
+                const idn = nm?.meta?.identity || '';
+                npcListLines.push(idn ? `- ${npcName}（${idn}）` : `- ${npcName}`);
+            }
+            if (npcSegs.length) {
+                // 详情段在前，名录行在后（覆盖空 NPC）
+                blocks.push(`[记忆宫殿·NPC 名录]\n${npcSegs.join('\n')}\n${npcListLines.join('\n')}`);
+            } else if (npcListLines.length) {
+                blocks.push(`[记忆宫殿·NPC 名录]\n${npcListLines.join('\n')}`);
+            }
+
+            // ============ 模块三：重要物品库汇总 ============
+            const itemsText = buildImportantItemsText(agentId);
+            if (itemsText) {
+                blocks.push(`[记忆宫殿·重要物品库]\n${itemsText}`);
+            }
+
+            if (!blocks.length) {
+                ctx.setExtensionPrompt(EXT_PROMPT_KEY, '', 0, 0);
+                return true;
+            }
+
+            const text = blocks.join('\n\n');
             ctx.setExtensionPrompt(EXT_PROMPT_KEY, text, 0, 0);
             return true;
         } catch (e) {
@@ -3976,31 +4097,90 @@
         }
     }
 
-    // 兜底/动态层：事件钩子 —— 实时组装完整记忆（含 userText 命中检索），多层兜底注入。
+    // 兜底/动态层：事件钩子 —— 只补充「按当前 userText 实时命中召回」的部分
+    // （相关记忆事件 / 纪念日 / 命中 NPC 简略）。主要角色全量、NPC 全量、物品库
+    // 已由主方案 setExtensionPrompt 稳定注入，此处不再重复，避免双份记忆浪费上下文。
+    function buildRetrievalOnlyPrompt(agentId, userText) {
+        const container = ensureContainer(agentId);
+        const parts = [];
+        const text = String(userText || '');
+        const push = (label, body) => {
+            if (body && String(body).trim()) parts.push(`${label}：${body}`);
+        };
+
+        // 命中关键词的关键事件
+        const relevant = retrieveRelevantEvents(agentId, userText);
+        if (relevant.length) {
+            const eventText = relevant.map((ev) => {
+                const kw = (ev.keywords || []).join('/');
+                const em = (ev.emotions || []).join('/');
+                const dt = ev.date ? `[${ev.date}]` : '';
+                const tag = [dt, kw, em].filter(Boolean).join(' · ');
+                return tag ? `${ev.content}（${tag}）` : ev.content;
+            }).join('；');
+            push('相关记忆事件', eventText);
+        }
+
+        // 命中日期关键词的纪念日
+        const relevantDiary = retrieveRelevantDiary(agentId, userText);
+        if (relevantDiary.length) {
+            const diaryText = relevantDiary
+                .map((d) => (d.date ? `[${d.date}] ${d.content}` : d.content))
+                .join('；');
+            push('纪念日记忆', diaryText);
+        }
+
+        // 命中 NPC 的简略记忆（全量 NPC 名录已由主方案发送，此处只补命中详情）
+        const npcNames = Object.keys(container?.npcs || {});
+        for (const npcName of npcNames) {
+            const npcMem = container.npcs[npcName];
+            const identity = npcMem?.meta?.identity || '';
+            const nameTokens = npcName.split(/[-—–_·\s]/).filter(Boolean);
+            const triggerTokens = [...nameTokens, identity].filter(Boolean);
+            const hit = triggerTokens.some((t) => t && text.includes(t));
+            if (!hit) continue;
+            const npcKeyEvents = npcMem.key_events || [];
+            if (npcKeyEvents.length) {
+                const brief = npcKeyEvents
+                    .map((e) => (typeof e === 'object' ? e.content : e))
+                    .filter(Boolean)
+                    .slice(-3)
+                    .join('；');
+                if (brief) {
+                    const label = identity ? `${npcName}（${identity}）` : npcName;
+                    push(`【${label}】记忆`, brief);
+                }
+            }
+        }
+
+        if (!parts.length) return '';
+        return `[记忆宫殿·实时召回]\n${parts.join('\n')}`;
+    }
+
     function injectMemory(eventData) {
         const settings = getSettings();
         if (!settings.enabled || !settings.injectPrompt) return;
         const agentId = getAgentId();
         if (!agentId) return;
 
-        // 每轮先刷新官方扩展提示词（主方案保险层）
+        // 每轮先刷新官方扩展提示词（主方案：全量主要角色 + NPC + 物品库）
         registerExtensionPromptBackground();
 
-        // 实时组装完整记忆（不依赖 pendingInjection 缓存，彻底消除 async 竞态）
+        // 兜底层只组装「按 userText 实时命中召回」的补充内容
         const userText = extractCurrentUserText(eventData);
         let injection = '';
         try {
-            injection = buildInjectionPrompt(agentId, userText);
+            injection = buildRetrievalOnlyPrompt(agentId, userText);
         } catch (e) {
-            console.warn('[记忆宫殿] 记忆组装失败：', e);
+            console.warn('[记忆宫殿] 检索召回组装失败：', e);
             return;
         }
         if (!injection) {
-            console.log('[记忆宫殿] 本轮未组装到记忆（记忆库为空或未命中），跳过动态注入');
+            console.log('[记忆宫殿] 本轮 userText 未命中召回内容，跳过兜底注入（主方案已注入全量记忆）');
             return;
         }
 
-        // 固定标识前缀：用于防重复 filter 匹配（buildInjectionPrompt 输出本身不以固定串开头）
+        // 固定标识前缀：用于防重复 filter 匹配
         const INJECT_TAG = '[记忆宫殿·注入记忆]';
         const tagged = `${INJECT_TAG}\n${injection}`;
 
@@ -4016,19 +4196,19 @@
                 is_system: true,
                 force_avatar: false,
             });
-            console.log('[记忆宫殿] ✅ 记忆已通过 eventData.chat 注入（长度 ' + injection.length + ' 字符）');
+            console.log('[记忆宫殿] ✅ 检索召回已通过 eventData.chat 注入（长度 ' + injection.length + ' 字符）');
             return;
         }
         // 兜底 2：eventData.system_prompt 字符串 → 拼接顶部
         if (typeof eventData.system_prompt === 'string') {
             eventData.system_prompt = `${tagged}\n\n${eventData.system_prompt}`;
-            console.log('[记忆宫殿] ✅ 记忆已通过 system_prompt 注入');
+            console.log('[记忆宫殿] ✅ 检索召回已通过 system_prompt 注入');
             return;
         }
         // 兜底 3：eventData.full_prompt 字符串 → 拼接顶部
         if (typeof eventData.full_prompt === 'string') {
             eventData.full_prompt = `${tagged}\n\n${eventData.full_prompt}`;
-            console.log('[记忆宫殿] ✅ 记忆已通过 full_prompt 注入');
+            console.log('[记忆宫殿] ✅ 检索召回已通过 full_prompt 注入');
             return;
         }
         console.warn('[记忆宫殿] ❌ 注入失败：eventData 无 chat/system_prompt/full_prompt 可用通道');
@@ -4282,6 +4462,11 @@
         findNpcNodeKey,
         buildExistingCharactersText,
         listMainCharacters,
+        // 记忆组装辅助函数（供测试/调试）
+        formatRoleMemoryForInjection,
+        formatNpcMemoryForInjection,
+        buildImportantItemsText,
+        buildRetrievalOnlyPrompt,
         // 注入逻辑（供测试/调试）
         injectMemory,
         registerExtensionPromptBackground,
